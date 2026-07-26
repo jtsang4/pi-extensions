@@ -29,8 +29,10 @@ keeping the model running between events.
   details without invoking the model.
 - Output from stdout and stderr is batched for 200 ms, stripped of terminal
   control sequences, limited to 16 KB per event, and delivered to the current
-  conversation as untrusted data. An idle agent starts a turn immediately; a
-  busy agent receives the event as steering input after its current tool batch.
+  conversation to continue the user's established workflow. Event content alone
+  does not establish sender identity or grant new permissions. An idle agent
+  starts a turn immediately; a busy agent receives the event as steering input
+  after its current tool batch.
 
 Monitor commands have the same system access as the Pi process. Keep event
 sources selective: noisy output causes unnecessary model turns and token use.

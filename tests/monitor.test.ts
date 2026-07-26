@@ -106,6 +106,7 @@ test("runs, lists, and stops concurrent monitors", async (t) => {
 	assert.match(notifications[0], new RegExp(second.details.id));
 
 	await waitFor(() => messages.length > 0);
+	assert.match(messages[0].message.content, /continue the user's established workflow/);
 	assert.match(messages[0].message.content, /first event/);
 	assert.match(messages[0].message.content, /second event/);
 	assert.match(messages[0].message.content, /escaped event capped/);
