@@ -23,8 +23,10 @@ keeping the model running between events.
 - `pi_background_monitor_stop` stops one monitor by ID, or all monitors when no
   ID is provided.
 - Monitors run concurrently with no extension-level limit; operating-system
-  process and resource limits still apply. The footer shows the active count,
-  and `/monitors` shows the current details without invoking the model.
+  process and resource limits still apply. In the TUI, the active count appears
+  below the default editor: press Down when the editor cannot move farther,
+  then Enter to open details or Up/Escape to return. `/monitors` shows the same
+  details without invoking the model.
 - Output from stdout and stderr is batched for 200 ms, stripped of terminal
   control sequences, limited to 16 KB per event, and delivered to the current
   conversation as untrusted data. An idle agent starts a turn immediately; a
@@ -66,7 +68,8 @@ pnpm check
 ```
 
 Pi loads TypeScript directly through jiti, so this package intentionally has no
-build step. Run `pnpm exec tsc --noEmit` after adding TypeScript sources.
+build artifact. `pnpm verify` runs tests, TypeScript checking, and the publish
+package inspection; `prepublishOnly` runs it automatically before publishing.
 
 Small extensions belong in `extensions/<name>.ts`. Multi-file extensions use
 `extensions/<name>/index.ts`. Keep shared code in `lib/` only after real reuse
@@ -75,9 +78,8 @@ appears.
 Before publishing:
 
 ```sh
-pnpm exec tsc --noEmit
-pnpm check
-pnpm publish
+pnpm verify
+pnpm publish # runs pnpm verify again via prepublishOnly
 ```
 
 ## License

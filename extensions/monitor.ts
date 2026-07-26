@@ -2,13 +2,25 @@ import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { stripVTControlCharacters } from "node:util";
 import {
+	CustomEditor,
 	createLocalBashOperations,
 	formatSize,
+	keyHint,
 	truncateHead,
 	truncateTail,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type KeybindingsManager,
+	type Theme,
 } from "@earendil-works/pi-coding-agent";
+import {
+	Text,
+	truncateToWidth,
+	type Component,
+	type EditorComponent,
+	type Focusable,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const BATCH_DELAY_MS = 200;
@@ -18,6 +30,7 @@ const MAX_EVENT_BYTES = 16 * 1024;
 const MAX_QUEUED_BYTES = MAX_EVENT_BYTES * 2;
 const MAX_QUEUED_LINES = 200;
 const STATUS_KEY = "jtsang4-background-monitors";
+const WIDGET_KEY = "jtsang4-background-monitor-navigator";
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u000d\u000e-\u001f\u007f]/g;
 
 type RunningMonitor = {
@@ -41,6 +54,64 @@ type RunningMonitor = {
 	done: Promise<void>;
 };
 
+class MonitorStatusWidget implements Component, Focusable {
+	focused = false;
+	private editor?: EditorComponent;
+	private keybindings?: KeybindingsManager;
+	private readonly tui: TUI;
+	private readonly theme: Theme;
+	private readonly getCount: () => number;
+	private readonly openDetails: () => void;
+
+	constructor(tui: TUI, theme: Theme, getCount: () => number, openDetails: () => void) {
+		this.tui = tui;
+		this.theme = theme;
+		this.getCount = getCount;
+		this.openDetails = openDetails;
+	}
+
+	connectEditor(editor: EditorComponent, keybindings: KeybindingsManager): void {
+		this.editor = editor;
+		this.keybindings = keybindings;
+	}
+
+	focus(): void {
+		this.tui.setFocus(this);
+	}
+
+	focusEditor(): void {
+		if (this.editor) this.tui.setFocus(this.editor);
+	}
+
+	refresh(): void {
+		if (this.getCount() === 0 && this.focused) this.focusEditor();
+		this.tui.requestRender();
+	}
+
+	handleInput(data: string): void {
+		if (this.keybindings?.matches(data, "tui.select.confirm")) {
+			this.openDetails();
+		} else if (
+			this.keybindings?.matches(data, "tui.select.up") ||
+			this.keybindings?.matches(data, "tui.select.cancel")
+		) {
+			this.focusEditor();
+		}
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const count = this.getCount();
+		if (count === 0) return [];
+		const label = `${this.focused ? "›" : " "} ${count} monitor${count === 1 ? "" : "s"}`;
+		const text = this.focused
+			? this.theme.bg("selectedBg", this.theme.fg("accent", label))
+			: this.theme.fg("dim", label);
+		return [truncateToWidth(text, width)];
+	}
+}
+
 function sanitizeLine(line: string): string {
 	return stripVTControlCharacters(line).replace(CONTROL_CHARACTERS, "");
 }
@@ -49,16 +120,34 @@ function escapeXml(text: string): string {
 	return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+function getTextContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part) =>
+			part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part
+				? String(part.text)
+				: "",
+		)
+		.filter(Boolean)
+		.join("\n");
+}
+
 export default function monitorExtension(pi: ExtensionAPI) {
 	const shell = createLocalBashOperations();
 	const monitors = new Map<string, RunningMonitor>();
 	let currentContext: ExtensionContext | undefined;
+	let monitorWidget: MonitorStatusWidget | undefined;
 	let shuttingDown = false;
 
 	function updateStatus(): void {
 		if (!currentContext?.hasUI) return;
 		const count = monitors.size;
-		currentContext.ui.setStatus(STATUS_KEY, count ? `${count} monitor${count === 1 ? "" : "s"}` : undefined);
+		currentContext.ui.setStatus(
+			STATUS_KEY,
+			currentContext.mode === "tui" || count === 0 ? undefined : `${count} monitor${count === 1 ? "" : "s"}`,
+		);
+		monitorWidget?.refresh();
 	}
 
 	function getMonitorDetails() {
@@ -95,6 +184,90 @@ export default function monitorExtension(pi: ExtensionAPI) {
 		return truncated.truncated
 			? `${truncated.content}\n[monitor list truncated to ${formatSize(MAX_EVENT_BYTES)}]`
 			: truncated.content;
+	}
+
+	async function showMonitorDetails(ctx: ExtensionContext): Promise<void> {
+		await ctx.ui.custom<void>(
+			(_tui, theme, keybindings, done) => {
+				const text = new Text("", 1, 1);
+				return {
+					handleInput(data: string) {
+						if (
+							keybindings.matches(data, "tui.select.confirm") ||
+							keybindings.matches(data, "tui.select.cancel")
+						) {
+							done();
+						}
+					},
+					invalidate: () => text.invalidate(),
+					render(width: number) {
+						text.setText(
+							`${formatMonitorList()}\n\n${theme.fg("dim", `${keyHint("tui.select.confirm", "close")} · ${keyHint("tui.select.cancel", "close")}`)}`,
+						);
+						return text.render(width);
+					},
+				};
+			},
+			{
+				overlay: true,
+				overlayOptions: { width: "80%", maxHeight: "80%", anchor: "center", margin: 1 },
+			},
+		);
+		if (monitors.size === 0) monitorWidget?.focusEditor();
+	}
+
+	function setupMonitorNavigation(ctx: ExtensionContext, restoreHistory: boolean): void {
+		if (ctx.mode !== "tui") return;
+		const previousEditorFactory = ctx.ui.getEditorComponent();
+
+		ctx.ui.setWidget(
+			WIDGET_KEY,
+			(tui, theme) => {
+				monitorWidget = new MonitorStatusWidget(tui, theme, () => monitors.size, () => {
+					void showMonitorDetails(ctx);
+				});
+				return monitorWidget;
+			},
+			{ placement: "belowEditor" },
+		);
+
+		if (previousEditorFactory) return;
+		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+			const editor = new CustomEditor(tui, theme, keybindings);
+			monitorWidget?.connectEditor(editor, keybindings);
+			if (restoreHistory) {
+				for (const entry of ctx.sessionManager.buildContextEntries()) {
+					if (entry.type !== "message" || entry.message.role !== "user") continue;
+					const text = getTextContent(entry.message.content);
+					if (text) editor.addToHistory(text);
+				}
+			}
+
+			const handleInput = editor.handleInput.bind(editor);
+			editor.handleInput = (data: string) => {
+				if (
+					monitors.size === 0 ||
+					editor.isShowingAutocomplete() ||
+					!keybindings.matches(data, "tui.editor.cursorDown")
+				) {
+					handleInput(data);
+					return;
+				}
+
+				const beforeCursor = editor.getCursor();
+				const beforeText = editor.getText();
+				handleInput(data);
+				const afterCursor = editor.getCursor();
+				if (
+					beforeText === editor.getText() &&
+					beforeCursor.line === afterCursor.line &&
+					beforeCursor.col === afterCursor.col
+				) {
+					monitorWidget?.focus();
+				}
+			};
+			return editor;
+		});
 	}
 
 	function discardQueuedOutput(monitor: RunningMonitor): void {
@@ -221,9 +394,10 @@ export default function monitorExtension(pi: ExtensionAPI) {
 		await monitor.done;
 	}
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		currentContext = ctx;
 		shuttingDown = false;
+		setupMonitorNavigation(ctx, event.reason !== "startup");
 		updateStatus();
 	});
 
@@ -233,6 +407,7 @@ export default function monitorExtension(pi: ExtensionAPI) {
 		await Promise.allSettled(active.map(stopMonitor));
 		monitors.clear();
 		updateStatus();
+		monitorWidget = undefined;
 		currentContext = undefined;
 	});
 

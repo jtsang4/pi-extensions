@@ -26,7 +26,9 @@
   ],
   "scripts": {
     "check": "pnpm pack --dry-run",
-    "test": "node --test --experimental-strip-types tests/*.test.ts"
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "verify": "pnpm test && pnpm exec tsc --noEmit && pnpm check",
+    "prepublishOnly": "pnpm verify"
   },
   "engines": {
     "node": ">=22.19.0"
