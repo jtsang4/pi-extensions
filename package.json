@@ -1,5 +1,5 @@
 {
-  "name": "@jtsang4/pi-extensions",
+  "name": "@jtsang/pi-extensions",
   "version": "0.1.0",
   "description": "An opinionated collection of extensions for Pi",
   "type": "module",

@@ -2,7 +2,7 @@
 
 ## Project
 
-This repository publishes `@jtsang4/pi-extensions`, an opinionated collection
+This repository publishes `@jtsang/pi-extensions`, an opinionated collection
 of Pi extensions. It is one repository and one npm package containing multiple
 independent extension entry points. Do not split it into workspaces or separate
 packages unless extensions require independent installation, dependencies, or

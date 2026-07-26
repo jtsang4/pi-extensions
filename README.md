@@ -1,6 +1,6 @@
 # Opinionated Pi Extensions
 
-`@jtsang4/pi-extensions` is my opinionated collection of extensions for
+`@jtsang/pi-extensions` is my opinionated collection of extensions for
 [Pi](https://github.com/earendil-works/pi). It reflects how I want Pi to work:
 focused defaults, small extensions, and no attempt to be a neutral framework
 for every workflow.
@@ -18,7 +18,7 @@ here with its behavior and configuration.
 Install the npm package:
 
 ```sh
-pi install npm:@jtsang4/pi-extensions
+pi install npm:@jtsang/pi-extensions
 ```
 
 Or install directly from GitHub:
