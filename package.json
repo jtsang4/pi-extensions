@@ -25,7 +25,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "pnpm pack --dry-run"
+    "check": "pnpm pack --dry-run",
+    "test": "node --test --experimental-strip-types tests/*.test.ts"
   },
   "engines": {
     "node": ">=22.19.0"
