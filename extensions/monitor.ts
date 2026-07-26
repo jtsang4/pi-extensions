@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	createLocalBashOperations,
 	formatSize,
+	truncateHead,
 	truncateTail,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -22,6 +23,11 @@ const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u000d\u000e-\u001f\u007f]/g;
 type RunningMonitor = {
 	id: string;
 	description: string;
+	command: string;
+	cwd: string;
+	persistent: boolean;
+	timeoutMs?: number;
+	startedAt: number;
 	abort: AbortController;
 	decoder: StringDecoder;
 	partialLine: string;
@@ -53,6 +59,42 @@ export default function monitorExtension(pi: ExtensionAPI) {
 		if (!currentContext?.hasUI) return;
 		const count = monitors.size;
 		currentContext.ui.setStatus(STATUS_KEY, count ? `${count} monitor${count === 1 ? "" : "s"}` : undefined);
+	}
+
+	function getMonitorDetails() {
+		const now = Date.now();
+		return [...monitors.values()].map((monitor) => ({
+			id: monitor.id,
+			description: monitor.description,
+			command: monitor.command,
+			cwd: monitor.cwd,
+			state: monitor.stopping ? "stopping" : "running",
+			persistent: monitor.persistent,
+			timeoutMs: monitor.timeoutMs,
+			startedAt: monitor.startedAt,
+			elapsedMs: now - monitor.startedAt,
+		}));
+	}
+
+	function formatMonitorList(): string {
+		const active = getMonitorDetails();
+		const lines = [`Active monitors: ${active.length} (no extension limit; system resource limits apply)`];
+		for (const monitor of active) {
+			lines.push(
+				`- ${monitor.id} · ${monitor.state} · elapsed=${(monitor.elapsedMs / 1000).toFixed(1)}s · ${monitor.persistent ? "persistent" : `timeout=${monitor.timeoutMs}ms`}`,
+				`  description=${JSON.stringify(monitor.description)}`,
+				`  cwd=${JSON.stringify(monitor.cwd)}`,
+				`  command=${JSON.stringify(monitor.command)}`,
+			);
+		}
+
+		const truncated = truncateHead(lines.join("\n"), {
+			maxLines: MAX_QUEUED_LINES,
+			maxBytes: MAX_EVENT_BYTES - 64,
+		});
+		return truncated.truncated
+			? `${truncated.content}\n[monitor list truncated to ${formatSize(MAX_EVENT_BYTES)}]`
+			: truncated.content;
 	}
 
 	function discardQueuedOutput(monitor: RunningMonitor): void {
@@ -194,6 +236,31 @@ export default function monitorExtension(pi: ExtensionAPI) {
 		currentContext = undefined;
 	});
 
+	pi.registerCommand("monitors", {
+		description: "Show active background monitors",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(formatMonitorList(), "info");
+		},
+	});
+
+	pi.registerTool({
+		name: "pi_background_monitor_list",
+		label: "List Monitors",
+		description:
+			"List active background monitors with their IDs, commands, working directories, elapsed time, and timeout state. The extension has no fixed concurrency limit; system resources are the limit.",
+		promptSnippet: "List active background monitors and their current state",
+		promptGuidelines: [
+			"Use pi_background_monitor_list to inspect active monitor count, commands, and runtime state.",
+		],
+		parameters: Type.Object({}),
+		async execute() {
+			return {
+				content: [{ type: "text", text: formatMonitorList() }],
+				details: { monitors: getMonitorDetails(), concurrencyLimit: null },
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: "pi_background_monitor",
 		label: "Monitor",
@@ -231,6 +298,11 @@ export default function monitorExtension(pi: ExtensionAPI) {
 			const monitor: RunningMonitor = {
 				id,
 				description: params.description,
+				command: params.command,
+				cwd: ctx.cwd,
+				persistent,
+				timeoutMs,
+				startedAt: Date.now(),
 				abort,
 				decoder: new StringDecoder("utf8"),
 				partialLine: "",
@@ -286,8 +358,10 @@ export default function monitorExtension(pi: ExtensionAPI) {
 					id,
 					description: params.description,
 					command: params.command,
+					cwd: ctx.cwd,
 					persistent,
 					timeoutMs,
+					startedAt: monitor.startedAt,
 				},
 			};
 		},

@@ -1,6 +1,6 @@
 {
   "name": "@jtsang/pi-extensions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An opinionated collection of extensions for Pi",
   "type": "module",
   "license": "MIT",

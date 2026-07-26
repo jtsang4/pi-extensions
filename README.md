@@ -18,8 +18,13 @@ keeping the model running between events.
 - `pi_background_monitor` starts a command in the session working directory.
   Non-persistent monitors time out after five minutes by default; persistent
   monitors run until stopped or the session ends.
+- `pi_background_monitor_list` lists every active monitor with its ID, command,
+  working directory, elapsed time, and timeout state.
 - `pi_background_monitor_stop` stops one monitor by ID, or all monitors when no
   ID is provided.
+- Monitors run concurrently with no extension-level limit; operating-system
+  process and resource limits still apply. The footer shows the active count,
+  and `/monitors` shows the current details without invoking the model.
 - Output from stdout and stderr is batched for 200 ms, stripped of terminal
   control sequences, limited to 16 KB per event, and delivered to the current
   conversation as untrusted data. An idle agent starts a turn immediately; a
