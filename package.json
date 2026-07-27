@@ -1,7 +1,7 @@
 {
   "name": "@jtsang/pi-extensions",
   "version": "0.1.3",
-  "description": "An opinionated collection of extensions for Pi",
+  "description": "An opinionated collection of Pi extensions and agent skills",
   "type": "module",
   "license": "MIT",
   "author": "jtsang4",
@@ -20,6 +20,7 @@
   ],
   "files": [
     "extensions",
+    "skills",
     "lib",
     "README.md",
     "LICENSE"
@@ -40,6 +41,9 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

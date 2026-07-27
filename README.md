@@ -1,12 +1,12 @@
 # Opinionated Pi Extensions
 
-`@jtsang/pi-extensions` is my opinionated collection of extensions for
-[Pi](https://github.com/earendil-works/pi). It reflects how I want Pi to work:
-focused defaults, small extensions, and no attempt to be a neutral framework
-for every workflow.
+`@jtsang/pi-extensions` is my opinionated collection of extensions and agent
+skills for [Pi](https://github.com/earendil-works/pi). It reflects how I want
+coding agents to work: focused defaults, small additions, and no attempt to be
+a neutral framework for every workflow.
 
-The extensions share one npm package and release lifecycle. Consumers can use
-`pi config` to enable only the extensions they want.
+The resources share one npm package and release lifecycle. Pi users can use
+`pi config` to enable only the resources they want.
 
 ## Extensions
 
@@ -36,6 +36,21 @@ keeping the model running between events.
 
 Monitor commands have the same system access as the Pi process. Keep event
 sources selective: noisy output causes unnecessary model turns and token use.
+
+## Skills
+
+### Lark Monitor
+
+`skills/lark-monitor/SKILL.md` keeps an agent session reachable through Lark
+while the user is away. It sends only task results, blockers, questions, and
+decision requests, then uses a persistent, event-driven listener to bring the
+user's verified replies back into the active session.
+
+The skill delegates authentication, messaging, and event consumption to the
+installed `lark-shared`, `lark-im`, and `lark-event` skills and `lark-cli`. Its
+instructions are host-neutral: any agent host can use it if it can stream a
+long-lived background process back into the active session. For Claude Code,
+copy or link the directory into `.claude/skills/lark-monitor`.
 
 ## Installation
 
