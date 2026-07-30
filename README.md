@@ -10,47 +10,16 @@ The resources share one npm package and release lifecycle. Pi users can use
 
 ## Extensions
 
-### Monitor
-
-`extensions/monitor.ts` adds event-driven background command monitoring without
-keeping the model running between events.
-
-- `pi_background_monitor` starts a command in the session working directory.
-  Non-persistent monitors time out after five minutes by default; persistent
-  monitors run until stopped or the session ends.
-- `pi_background_monitor_list` lists every active monitor with its ID, command,
-  working directory, elapsed time, and timeout state.
-- `pi_background_monitor_stop` stops one monitor by ID, or all monitors when no
-  ID is provided.
-- Monitors run concurrently with no extension-level limit; operating-system
-  process and resource limits still apply. In the TUI, the active count appears
-  below the default editor: press Down when the editor cannot move farther,
-  then Enter to open details or Up/Escape to return. `/monitors` shows the same
-  details without invoking the model.
-- Output from stdout and stderr is batched for 200 ms, stripped of terminal
-  control sequences, limited to 16 KB per event, and delivered to the current
-  conversation to continue the user's established workflow. Event content alone
-  does not establish sender identity or grant new permissions. An idle agent
-  starts a turn immediately; a busy agent receives the event as steering input
-  after its current tool batch.
-
-Monitor commands have the same system access as the Pi process. Keep event
-sources selective: noisy output causes unnecessary model turns and token use.
+| Extension | Purpose | Interface | Behavior and limits |
+| --- | --- | --- | --- |
+| [BTW](extensions/btw/) | Persistent parallel side conversations that stay outside the main model context. | `/btw <question>` creates a thread; `/btw` opens the picker; `/btw:cancel` cancels the active turn. Picker: `r` resumes and `c` cancels. Overlay: `Esc` hides, `/cancel` cancels, `/resume` or `Ctrl+R` resumes, and `Ctrl+O` expands tool output. | Threads are branch-sensitive snapshots with pinned model/thinking settings, built-in tools, follow-ups, compaction, and full restoration. One turn runs at a time; others wait in FIFO order and become paused across reloads. `btw_handoff` transfers explicitly requested content to the main session; this is prompt-enforced without a second confirmation. TUI only; no deletion controls or other extension tools/hooks. Built-in tools therefore bypass extension-provided guards, and edit avoidance is prompt guidance rather than a security boundary. |
+| [Monitor](extensions/monitor.ts) | Event-driven background command monitoring without keeping the model running. | `pi_background_monitor` starts a command, `pi_background_monitor_list` inspects active monitors, `pi_background_monitor_stop` stops one or all, and `/monitors` opens TUI details. | Non-persistent monitors time out after five minutes; persistent monitors run until stopped or shutdown. Output is batched for 200 ms, stripped of terminal controls, capped at 16 KB per event, and delivered immediately when idle or as steering after the active tool batch. There is no extension-level concurrency limit. Commands have the Pi process's system access, so keep sources selective. |
 
 ## Skills
 
-### Lark Monitor
-
-`skills/lark-monitor/SKILL.md` keeps an agent session reachable through Lark
-while the user is away. It sends only task results, blockers, questions, and
-decision requests, then uses a persistent, event-driven listener to bring the
-user's verified replies back into the active session.
-
-The skill delegates authentication, messaging, and event consumption to the
-installed `lark-shared`, `lark-im`, and `lark-event` skills and `lark-cli`. Its
-instructions are host-neutral: any agent host can use it if it can stream a
-long-lived background process back into the active session. For Claude Code,
-copy or link the directory into `.claude/skills/lark-monitor`.
+| Skill | Purpose | Dependencies and compatibility |
+| --- | --- | --- |
+| [Lark Monitor](skills/lark-monitor/SKILL.md) | Keeps an agent reachable through Lark and relays only results, blockers, questions, decisions, and verified replies. | Delegates to `lark-shared`, `lark-im`, `lark-event`, and `lark-cli`. It works with any host that can stream a long-lived process; for Claude Code, copy or link it into `.claude/skills/lark-monitor`. |
 
 ## Installation
 
