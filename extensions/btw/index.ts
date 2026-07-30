@@ -70,6 +70,7 @@ export default function btwExtension(pi: ExtensionAPI) {
 		currentContext = ctx;
 		const state: OverlayRuntime = { ctx, threadId, closed: false };
 		overlay = state;
+		// The command must return so Main can keep running; this controller retains input focus for the separate overlay.
 		void ctx.ui
 			.custom<void>((tui, theme, keybindings, done) => {
 				state.done = done;

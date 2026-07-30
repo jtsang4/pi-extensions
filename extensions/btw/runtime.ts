@@ -193,6 +193,7 @@ function appendStoredEntry(
 	return runtimeId;
 }
 
+// Replayed SessionManagers generate new IDs; canonical maps keep persisted compaction and label references stable.
 function materializeThread(thread: BtwThread, cwd: string): MaterializedThread {
 	const manager = SessionManager.inMemory(cwd);
 	const canonicalToRuntime = new Map<string, string>();
@@ -472,6 +473,7 @@ export class BtwRuntime {
 			}
 		}
 		if (event.type === "message_end") {
+			// AgentSession emits message_end immediately before SessionManager appends it.
 			queueMicrotask(() => {
 				if (this.active === active) active.turnEntries?.push(...this.syncEntries(active.threadId, materialized));
 			});
@@ -537,6 +539,7 @@ export class BtwRuntime {
 			const messageCountBefore = session.messages.length;
 			if (active.cancelReason) await session.abort();
 			else await session.prompt(active.prompt, { source: "extension" });
+			// Keep incrementally synced entries: compaction may remove the final assistant from session.messages.
 			const appended = [...active.turnEntries, ...this.syncEntries(active.threadId, materialized)];
 
 			const assistantEntry = [...appended].reverse().find(

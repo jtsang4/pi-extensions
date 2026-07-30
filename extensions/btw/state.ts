@@ -2,6 +2,7 @@ import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent
 
 export const BTW_STATE_ENTRY_TYPE = "jtsang4-btw-state";
 export const BTW_HANDOFF_MESSAGE_TYPE = "jtsang4-btw-handoff";
+// Persisted in Main Session JSONL; bump only together with reducer compatibility or migration.
 export const BTW_STATE_VERSION = 1;
 
 export type BtwThreadStatus = "queued" | "running" | "idle" | "paused" | "interrupted";
