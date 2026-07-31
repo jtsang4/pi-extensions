@@ -279,14 +279,14 @@ export class BtwConversationOverlay implements Component, Focusable {
 			this.onCancel();
 			return;
 		}
-		if (matchesKey(data, Key.pageUp)) {
+		if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
 			this.follow = false;
-			this.scrollOffset = Math.max(0, this.scrollOffset - 8);
+			this.scrollOffset = Math.max(0, this.scrollOffset - (matchesKey(data, Key.up) ? 1 : 8));
 			this.tui.requestRender();
 			return;
 		}
-		if (matchesKey(data, Key.pageDown)) {
-			this.scrollOffset += 8;
+		if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
+			this.scrollOffset += matchesKey(data, Key.down) ? 1 : 8;
 			this.tui.requestRender();
 			return;
 		}
@@ -354,7 +354,7 @@ export class BtwConversationOverlay implements Component, Focusable {
 			...visible.map((line) => this.frame(line, innerWidth)),
 			rule,
 			this.frame(inputLine, innerWidth),
-			this.frame(this.theme.fg("dim", "Enter send · Esc hide · /cancel · /resume · Ctrl+O tools"), innerWidth),
+			this.frame(this.theme.fg("dim", "↑↓ scroll · PgUp/PgDn page · Enter send · Esc hide · Ctrl+O tools"), innerWidth),
 			bottom,
 		].map((line) => truncateToWidth(line, dialogWidth, ""));
 	}

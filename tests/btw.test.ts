@@ -599,5 +599,10 @@ test("Escape hides a BTW overlay without cancelling; /cancel cancels a running t
 	overlay.handleInput("\x1b[200~alpha\nbeta\x1b[201~");
 	overlay.handleInput("\r");
 	assert.deepEqual(submitted, ["alpha beta"]);
+	overlay.handleInput("\x0f");
+	for (let index = 0; index < 100; index++) overlay.handleInput("\x1b[A");
+	assert.match(overlay.render(79).join("\n"), /You/);
+	for (let index = 0; index < 100; index++) overlay.handleInput("\x1b[B");
+	assert.match(overlay.render(79).join("\n"), /tool output truncated for display/);
 	assert.ok(overlay.render(79).every((line) => visibleWidth(line) <= 79));
 });
