@@ -19,7 +19,7 @@ The resources share one npm package and release lifecycle. Pi users can use
 
 | Skill | Purpose | Dependencies and compatibility |
 | --- | --- | --- |
-| [Lark Monitor](skills/lark-monitor/SKILL.md) | Keeps an agent reachable through Lark and relays only results, blockers, questions, decisions, and verified replies. | Delegates to `lark-shared`, `lark-im`, `lark-event`, and `lark-cli`. It works with any host that can stream a long-lived process; for Claude Code, copy or link it into `.claude/skills/lark-monitor`. |
+| [Lark Monitor](skills/lark-monitor/SKILL.md) | Keeps concurrent agent sessions reachable through a shared Lark topic group: each session owns a thread and relays only results, blockers, questions, decisions, and verified replies. | Delegates to `lark-shared`, `lark-im`, `lark-event`, `lark-cli`, and `node`. State lives in `~/.lark-monitor/` (target group config + session-thread map); legacy P2P mode is kept in `references/p2p-mode.md` for explicit opt-in. Works with any host that can stream a long-lived process; for Claude Code, copy or link it into `.claude/skills/lark-monitor`. |
 
 ## Installation
 
