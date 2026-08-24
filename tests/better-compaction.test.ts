@@ -109,7 +109,7 @@ function fakeContext(model: Model<any> | undefined, overrides: Record<string, un
 }
 
 function event(prep = preparation(), overrides: Record<string, unknown> = {}) {
-	return { preparation: prep, branchEntries: [], signal: new AbortController().signal, reason: "threshold" as const, ...overrides };
+	return { preparation: prep, branchEntries: [], signal: new AbortController().signal, reason: "threshold" as const, willRetry: false, ...overrides };
 }
 
 /** Scripted fake LLM: records each call, returns queued responses or throws. */
@@ -271,6 +271,29 @@ test("mergeFileLists merges prior lists and demotes later-modified files", () =>
 	assert.deepEqual(mergeFileLists(fileOps, undefined), { readFiles: ["a.ts"], modifiedFiles: ["b.ts"] });
 });
 
+test("prior-details ownership boundary: foreign hook details are opaque, own engine's merge", async () => {
+	const branch = (fromHook: boolean | undefined, details: unknown) => [
+		{ type: "user", id: "u0", parentId: "h", timestamp: 0 },
+		{ type: "compaction", id: "c0", parentId: "u0", timestamp: 1, summary: "old", firstKeptEntryId: "u0", tokensBefore: 1000, fromHook, details },
+	];
+	const mk = () => createSessionBeforeCompactHandler(scriptedComplete([assistantWithText("## Primary Request and Intent\n- checkpoint")]).fn);
+
+	// Foreign hook-supplied details: not interpreted — current fileOps only.
+	const foreign = await mk()(event(preparation(), { branchEntries: branch(true, { readFiles: ["secret.ts"] }) }), fakeContext(fakeModel()));
+	assert.deepEqual(foreign?.compaction?.details?.readFiles, ["login.ts"], "foreign engine's file lists must not merge");
+
+	// Own engine's marker on a hook entry: merged (chain continuity).
+	const own = await mk()(
+		event(preparation(), { branchEntries: branch(true, { engine: "jtsang4-better-compaction", readFiles: ["mine.ts"], modifiedFiles: [] }) }),
+		fakeContext(fakeModel()),
+	);
+	assert.deepEqual(own?.compaction?.details?.readFiles, ["login.ts", "mine.ts"], "own engine's prior details merge");
+
+	// pi-generated details (fromHook falsy): merged, like the default path.
+	const piGen = await mk()(event(preparation(), { branchEntries: branch(false, { readFiles: ["pi.ts"] }) }), fakeContext(fakeModel()));
+	assert.deepEqual(piGen?.compaction?.details?.readFiles, ["login.ts", "pi.ts"], "pi-generated prior details merge");
+});
+
 // ---------- handler: full injected pipeline ----------
 
 test("handler yields on OpenAI Responses models and never calls the LLM", async () => {
@@ -329,6 +352,7 @@ test("handler returns a marked compaction result: replay + prune + system prompt
 	assert.equal(c.firstKeptEntryId, "kept-1");
 	assert.equal(c.tokensBefore, 50000);
 	assert.ok(c.summary.includes("fix login"));
+	assert.deepEqual(c.usage, USAGE, "successful attempt's usage is persisted, not lost");
 
 	// details: engine marker + cumulative files (prior legacy.ts + current login.ts) + pruned count
 	assert.equal(c.details?.engine, "jtsang4-better-compaction");

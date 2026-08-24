@@ -25,6 +25,7 @@ import {
 	buildCompactionDetails,
 	buildSummaryMessages,
 	dropOrphanToolResults,
+	ENGINE_ID,
 	estimateTextTokens,
 	extractSummaryText,
 	pruneToolResults,
@@ -39,11 +40,17 @@ const MAX_ATTEMPTS = 2;
 /** LLM call seam: type of pi-ai/compat complete(). */
 export type CompleteFn = (model: Model<any>, context: Context, options?: Record<string, unknown>) => Promise<AssistantMessage>;
 
-/** Find file lists recorded by the previous compaction entry, for cumulative tracking. */
+/** Find file lists recorded by the previous compaction entry, for cumulative
+ * tracking. Respects the details ownership boundary: only pi-generated
+ * details or our own engine's format may be interpreted; other extensions'
+ * details are opaque. */
 function findPriorCompactionDetails(branchEntries: SessionEntry[]): unknown {
 	for (let i = branchEntries.length - 1; i >= 0; i--) {
 		const entry = branchEntries[i];
-		if (entry.type === "compaction") return entry.details;
+		if (entry.type !== "compaction") continue;
+		const ours = (entry.details as { engine?: string } | undefined)?.engine === ENGINE_ID;
+		if (entry.fromHook && !ours) return undefined;
+		return entry.details;
 	}
 	return undefined;
 }
@@ -60,6 +67,8 @@ export interface SessionBeforeCompactEventLike {
 	branchEntries: SessionEntry[];
 	customInstructions?: string;
 	reason: "manual" | "threshold" | "overflow";
+	/** True when the aborted turn is retried after this compaction (overflow recovery). */
+	willRetry: boolean;
 	signal: AbortSignal;
 }
 
@@ -156,6 +165,10 @@ export function createSessionBeforeCompactHandler(completeFn: CompleteFn) {
 						summary,
 						firstKeptEntryId: preparation.firstKeptEntryId,
 						tokensBefore: preparation.tokensBefore,
+						// The entry snapshot carries only the successful attempt's usage;
+						// discarded shrink-failure attempts have no reporting channel in
+						// the extension API.
+						usage: response.usage,
 						details,
 					},
 				};
