@@ -59,6 +59,15 @@ Pi loads TypeScript directly through jiti, so this package intentionally has no
 build artifact. `pnpm verify` runs tests, TypeScript checking, and the publish
 package inspection; `prepublishOnly` runs it automatically before publishing.
 
+The [Verify workflow](.github/workflows/verify.yml) runs these checks and the
+deterministic subagent E2E suite on pushes to `main` and pull requests targeting
+`main`. Feature-branch pushes do not also create duplicate runs. Changes confined
+to repository documentation, the license, or local agent/skill configuration
+skip verification; mixed code/documentation changes and published `skills/`
+content still run it. Manual verification remains available through
+`gh workflow run verify.yml`. Real-model tests run separately and do not incur
+model API usage in CI.
+
 Small extensions belong in `extensions/<name>.ts`. Multi-file extensions use
 `extensions/<name>/index.ts`. Keep shared code in `lib/` only after real reuse
 appears.
