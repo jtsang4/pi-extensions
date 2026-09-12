@@ -65,6 +65,20 @@ appears.
 
 ## Publishing
 
+Use the repository's [release skill](.agents/skills/release/SKILL.md) to handle
+the whole release: commit pending changes, fetch and merge current code, read
+npm versions, update the version, push the release tag, and verify the result.
+For example, ask to "release a patch" or "publish version 0.5.0". Without a
+version, it first synchronizes the repository and then asks you to choose major,
+minor, or patch with concrete version numbers. An explicit version already in
+`package.json` is reused; increment requests use the higher of the synchronized
+local version and npm's highest stable version.
+
+The skill lives in `.agents/skills/release`, with relative symlinks at
+`claude/skills/release` and `.claude/skills/release` (Claude Code's project skill
+location). It is repository maintenance tooling and is not included in the npm
+package.
+
 Releases use [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
 from GitHub Actions. No npm token secret is needed. The
 [`publish.yml`](.github/workflows/publish.yml) workflow uses the pnpm version
