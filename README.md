@@ -63,12 +63,50 @@ Small extensions belong in `extensions/<name>.ts`. Multi-file extensions use
 `extensions/<name>/index.ts`. Keep shared code in `lib/` only after real reuse
 appears.
 
-Before publishing:
+## Publishing
+
+Releases use [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
+from GitHub Actions. No npm token secret is needed. The
+[`publish.yml`](.github/workflows/publish.yml) workflow uses the pnpm version
+pinned in `package.json`, installs the frozen lockfile, and runs the existing
+`prepublishOnly` checks before publishing.
+
+The package's npm **Settings → Trusted Publisher** connection must specify:
+
+| Field | Value |
+| --- | --- |
+| Provider | GitHub Actions |
+| Organization or user | `jtsang4` |
+| Repository | `pi-extensions` |
+| Workflow filename | `publish.yml` |
+| Environment | Leave empty |
+| Allowed actions | Enable direct publishing (`npm publish`), not only staging |
+
+To validate the configuration without releasing a version:
 
 ```sh
-pnpm verify
-pnpm publish # runs pnpm verify again via prepublishOnly
+gh workflow run publish.yml --ref main -f dry_run=true
 ```
+
+The dry run exchanges the workflow's OIDC identity for an npm credential to
+verify the real trust relationship, then runs `pnpm publish --dry-run`.
+Credentials stay in memory and are never printed or stored. Both this repository
+and the package are public, so pnpm's OIDC flow also enables npm provenance.
+
+For a release, bump the version, commit the changes, and push `main`. Then push
+a tag matching `package.json` exactly:
+
+```sh
+release_tag="v$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+git tag "$release_tag"
+git push origin "$release_tag"
+```
+
+The tag push publishes automatically. Stable versions use the `latest` npm
+dist-tag; prereleases use `next`. The workflow rejects mismatched tags and
+commits outside `main`'s history. Manual runs default to dry-run mode; to retry a
+failed release, dispatch the workflow at its release tag with `dry_run=false`.
+An already-published version cannot be overwritten.
 
 ## License
 

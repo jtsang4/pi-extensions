@@ -1,0 +1,73 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Verify npm trust and the package without publishing
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0; version from packageManager
+        with:
+          cache: false
+
+      - name: Validate release ref
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const expected = `refs/tags/v${version}`;
+          const mainDryRun = process.env.DRY_RUN === 'true' && process.env.GITHUB_REF === 'refs/heads/main';
+          if (name !== '@jtsang/pi-extensions' || (process.env.GITHUB_REF !== expected && !mainDryRun)) {
+            throw new Error(`Publish requires ${expected}; only dry runs may use main.`);
+          }
+          appendFileSync(process.env.GITHUB_ENV, `DIST_TAG=${version.includes('-') ? 'next' : 'latest'}\n`);
+          NODE
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify npm trusted publisher
+        run: node .github/scripts/check-npm-trust.mjs
+
+      - name: Verify and publish package
+        # prepublishOnly runs pnpm verify, including in dry-run mode.
+        run: |
+          args=(--access public --no-git-checks --tag "$DIST_TAG")
+          if [[ "$DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          pnpm publish "${args[@]}"
