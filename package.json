@@ -28,6 +28,7 @@
   "scripts": {
     "check": "pnpm pack --dry-run",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "test:subagent:e2e": "pnpm exec node --experimental-strip-types tests/subagent.e2e.ts && pnpm exec node --experimental-strip-types tests/subagent.branch-e2e.ts && pnpm exec node --experimental-strip-types tests/subagent.crash-e2e.ts && pnpm exec node --experimental-strip-types tests/subagent.policy-e2e.ts",
     "verify": "pnpm test && pnpm exec tsc --noEmit && pnpm check",
     "prepublishOnly": "pnpm verify"
   },
