@@ -5,37 +5,66 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { SubagentRuntime, bounded, type Child } from "./runtime.ts";
-import { SubagentStorage } from "./storage.ts";
+import { SubagentStorage, type ResultPage } from "./storage.ts";
 import { join } from "node:path";
 
 const ROLES = {
 	scout: ["read", "grep", "find", "ls"],
 	worker: ["read", "grep", "find", "ls", "bash", "edit", "write"],
 };
+const ACTION_FIELDS: Record<string, string[]> = {
+	spawn: ["task", "role", "model", "timeoutMs", "maxTurns"], send: ["id", "task"],
+	wait: ["id", "ids", "waitMs", "waitFor"], stop: ["id"], forget: ["id"], result: ["id", "offset"], list: [],
+};
 
 export default function subagent(pi: ExtensionAPI): void {
 	const runtime = new SubagentRuntime();
+	let initializationAttempted = false;
 	let initializationError: unknown;
+	let activeStore: SubagentStorage | undefined;
+	let lastCleanupAt = 0;
+	let lastCleanupSettings = "";
+	const activeBuiltins = () => {
+		const active = new Set(pi.getActiveTools());
+		return new Set(pi.getAllTools().filter((tool) => tool.sourceInfo.source === "builtin" && active.has(tool.name)).map((tool) => tool.name));
+	};
 	const restore = async (ctx: ExtensionContext) => {
+		initializationAttempted = true;
 		initializationError = new Error("Subagent storage is initializing.");
+		let store: SubagentStorage | undefined;
 		try {
 			await runtime.shutdown();
-			const store = ctx.sessionManager.getSessionFile() ? SubagentStorage.fromEnvironment() : undefined;
+			store = ctx.sessionManager.getSessionFile() ? SubagentStorage.fromEnvironment() : undefined;
 			await runtime.restore(ctx.sessionManager.getBranch(), store ? { store, parentId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, branchId: ctx.sessionManager.getLeafId() } : undefined);
+			const parents = new Set([ctx.sessionManager.getSessionId()]);
 			if (store) {
-				const parents = new Set([ctx.sessionManager.getSessionId()]);
 				for (const child of runtime.snapshot().children) {
 					if (child.checkpoint) parents.add(child.checkpoint.parentId);
 					if (child.archive) parents.add(child.archive.parentId);
 				}
+				for (const parent of parents) await store.protect(parent);
+			}
+			const previous = activeStore;
+			activeStore = store;
+			try { await previous?.release(); }
+			catch (error) { if (ctx.hasUI) ctx.ui.notify(`Subagent lease cleanup failed: ${String(error)}`, "warning"); }
+			if (store) {
 				try {
-					for (const parent of parents) await store.protect(parent);
-					await store.prune(Date.now(), parents);
+					const settings = JSON.stringify([store.root, store.retentionDays, store.maxBytes]);
+					if (settings !== lastCleanupSettings || Date.now() - lastCleanupAt >= 300_000) {
+						await store.prune(Date.now(), parents);
+						lastCleanupAt = Date.now();
+						lastCleanupSettings = settings;
+					}
 				}
 				catch (error) { if (ctx.hasUI) ctx.ui.notify(`Subagent archive cleanup failed: ${String(error)}`, "warning"); }
 			}
 			initializationError = undefined;
-		} catch (error) { initializationError = error; throw error; }
+		} catch (error) {
+			if (store !== activeStore) await store?.release().catch(() => {});
+			initializationError = error;
+			throw error;
+		}
 	};
 	const factory = (ctx: ExtensionContext) => async (child: Child) => {
 		const model = ctx.modelRegistry.find(child.model.provider, child.model.id);
@@ -52,7 +81,7 @@ export default function subagent(pi: ExtensionAPI): void {
 			systemPromptOverride: () => undefined,
 			appendSystemPromptOverride: () => [
 				`You are a ${child.role} subagent handling a bounded task for a parent agent. You have a separate conversation and share its working directory. Work only on the assigned task. Other agents may edit files concurrently; do not undo their changes. Return a concise report with evidence, changed paths, checks, and unresolved issues. You cannot delegate. Your tool allowlist is not an OS sandbox.`,
-				...(child.archiveDir ? [`Your run and final report are archived automatically in ${JSON.stringify(child.archiveDir)}. If your tools allow writing, save temporary reports and test logs in ${JSON.stringify(join(child.archiveDir, "artifacts"))}. Keep project deliverables in their requested project paths. List any artifacts in your final report.`] : []),
+				"When a task includes subagent run context, its run and final report are archived automatically. If your tools allow writing, use the artifacts directory provided with the current task for temporary reports and test logs. Keep project deliverables in their requested paths. List artifacts in your final report.",
 			],
 		});
 		await loader.reload();
@@ -64,7 +93,7 @@ export default function subagent(pi: ExtensionAPI): void {
 				manager.appendMessage(structuredClone(message));
 			}
 		}
-		const active = new Set(pi.getActiveTools());
+		const active = activeBuiltins();
 		const { session } = await createAgentSession({
 			cwd: ctx.cwd, model, modelRuntime, sessionManager: manager, settingsManager, resourceLoader: loader,
 			thinkingLevel: child.thinking as ReturnType<ExtensionAPI["getThinkingLevel"]>,
@@ -76,26 +105,35 @@ export default function subagent(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "pi_subagent",
 		label: "Subagent",
-		description: "Delegate independent tasks to Pi subagents. spawn returns an ID immediately; wait collects results (timeout leaves children running); send steers a running child or starts a follow-up on an idle child; stop cancels; list inspects all children. Default scout has read-only built-ins; worker can modify files using the parent's active built-ins. Separate contexts; no other extensions or their safety hooks. Children share the filesystem. Max 4 active, 32 per branch. Always wait for or stop your children before ending the task.",
+		description: "Delegate independent tasks to Pi subagents. spawn returns an ID immediately; wait collects all selected results or waitFor:any returns when one finishes (timeout leaves children running); send steers a running child or starts a follow-up on an idle child; stop cancels; list shows results, progress and usage; result reads the full archived report in bounded pages using offset/nextOffset; forget removes a terminal child from this branch while keeping its archives. Default scout has read-only built-ins; worker can modify files using the parent's active built-ins. Separate contexts; no other extensions or their safety hooks. Children share the filesystem. Max 4 active, 32 per branch. Always wait for or stop your children before ending the task.",
 		promptSnippet: "Delegate bounded work to independent, continuable subagents",
-		promptGuidelines: ["Delegate only independent work that benefits from a separate context. Supply all necessary context in task. Assign non-overlapping files to workers. Inspect child status and evidence before relying on results. A wait timeout is not failure or cancellation."],
+		promptGuidelines: ["Delegate only independent work that benefits from a separate context. Supply all necessary context and success criteria in task. Assign non-overlapping files to workers. Inspect child status and evidence before relying on results. A wait timeout is not failure or cancellation. Use waitFor:any with running IDs to act on early results; exclude already-completed IDs from subsequent waits. Use forget for finished, unrelated tasks when record capacity is needed."],
 		executionMode: "sequential",
 		parameters: Type.Object({
-			action: StringEnum(["spawn", "list", "wait", "send", "stop"]),
+			action: StringEnum(["spawn", "list", "wait", "send", "stop", "forget", "result"]),
 			task: Type.Optional(Type.String({ minLength: 1, maxLength: 32_000 })),
 			id: Type.Optional(Type.String()),
 			ids: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 32 })),
 			role: Type.Optional(StringEnum(["scout", "worker"])),
-			model: Type.Optional(Type.String({ description: "Exact provider/model-id; defaults to parent's model." })),
-			timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 600_000, description: "Per child turn, default 300000." })),
-			maxTurns: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Model-turn budget per task, default 32." })),
+			model: Type.Optional(Type.String({ description: "spawn only: exact provider/model-id; defaults to parent's model." })),
+			timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 600_000, description: "spawn only: per child turn, default 300000." })),
+			maxTurns: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "spawn only: model-turn budget per task, default 32." })),
 			waitMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 60_000, description: "Wait at most this long for all selected children, default 10000." })),
+			waitFor: Type.Optional(StringEnum(["all", "any"], { description: "Default all. any returns when at least one selected child is terminal." })),
+			offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "For result only: byte offset, default 0. Continue with the returned nextOffset." })),
 		}),
 		execute: async (_callId, args, signal, _update, ctx) => {
 			if (signal?.aborted) throw new Error("Subagent operation cancelled.");
+			if (!initializationAttempted) await restore(ctx);
+			if (signal?.aborted) throw new Error("Subagent operation cancelled before admission.");
 			if (initializationError) throw new Error(`Subagent storage initialization failed: ${String(initializationError)}`);
+			if (!Object.hasOwn(ACTION_FIELDS, args.action)) throw new Error(`Unknown subagent action: ${args.action}`);
+			const unsupported = Object.entries(args).filter(([key, value]) => key !== "action" && value !== undefined && !ACTION_FIELDS[args.action]?.includes(key)).map(([key]) => key);
+			if (unsupported.length) throw new Error(`${args.action} does not accept: ${unsupported.join(", ")}.`);
+			if (args.id && args.ids) throw new Error("Choose id or ids, not both.");
 			runtime.setBranch(ctx.sessionManager.getLeafId());
 			let selected: string[] = [];
+			let resultPage: ResultPage | undefined;
 			const requireId = () => {
 				if (!args.id) throw new Error(`${args.action} requires id.`);
 				return args.id;
@@ -114,30 +152,34 @@ export default function subagent(pi: ExtensionAPI): void {
 					}
 					if (!model) throw new Error("Select an available model using provider/model-id.");
 					const role = args.role === "worker" ? "worker" : "scout";
-					const active = new Set(pi.getActiveTools());
-					const builtins = new Set(pi.getAllTools().filter((tool) => tool.sourceInfo.source === "builtin").map((tool) => tool.name));
+					const active = activeBuiltins();
 					selected = [runtime.spawn({ task, role, model: { provider: model.provider, id: model.id },
-						thinking: pi.getThinkingLevel(), tools: ROLES[role].filter((tool) => active.has(tool) && builtins.has(tool)),
+						thinking: pi.getThinkingLevel(), tools: ROLES[role].filter((tool) => active.has(tool)),
 						timeoutMs: args.timeoutMs ?? 300_000, maxTurns: args.maxTurns ?? 32,
 					}, factory(ctx))];
 					break;
 				}
-				case "send": selected = [requireId()]; await runtime.send(selected[0]!, requireTask(), factory(ctx)); break;
+				case "send": selected = [requireId()]; await runtime.send(selected[0]!, requireTask(), factory(ctx), signal); break;
 				case "stop": selected = [requireId()]; await runtime.stop(selected[0]!); break;
+				case "forget": runtime.forget(requireId()); break;
+				case "result": selected = [requireId()]; resultPage = await runtime.result(selected[0]!, args.offset); break;
 				case "wait":
 					selected = args.ids ?? (args.id ? [args.id] : runtime.snapshot().children.map((child) => child.id));
-					await runtime.wait(selected, args.waitMs ?? 10_000, signal);
+					await runtime.wait(selected, args.waitMs ?? 10_000, signal, args.waitFor === "any" ? "any" : "all");
 					break;
 				case "list": break;
 			}
+			if (signal?.aborted) throw new Error("Subagent operation cancelled; inspect list for the state of any already accepted work.");
 			const details = runtime.snapshot();
-			const children = details.children.filter((child) => selected.length === 0 || selected.includes(child.id));
-			const outputBytes = args.action === "list" ? 512 : Math.floor(24_000 / Math.max(1, children.length));
+			const children = details.children.filter((child) => selected.length === 0 || selected.includes(child.id)).map((child) => runtime.get(child.id));
+			const outputBytes = args.action === "list" || resultPage ? 512 : Math.floor(24_000 / Math.max(1, children.length));
 			return {
 				content: [{ type: "text", text: JSON.stringify(children.map((child) => ({
 					id: child.id, role: child.role, task: bounded(child.task, 256), status: child.status, turn: child.turn,
 					model: child.model, tools: child.tools, resumable: child.resumable,
 					archiveDir: child.archiveDir, artifactsDir: child.archiveDir ? join(child.archiveDir, "artifacts") : undefined,
+					activity: child.activity ? { ...child.activity, elapsedMs: Math.max(0, (child.activity.finishedAt ?? Date.now()) - child.activity.startedAt) } : undefined,
+					result: resultPage,
 					output: bounded(child.output, outputBytes), error: child.error ? bounded(child.error, 512) : undefined,
 				}))) }],
 				details,
@@ -149,5 +191,5 @@ export default function subagent(pi: ExtensionAPI): void {
 	pi.on("session_before_fork", () => runtime.shutdown());
 	pi.on("session_before_tree", () => runtime.shutdown());
 	pi.on("session_tree", (_event, ctx) => restore(ctx));
-	pi.on("session_shutdown", () => runtime.shutdown());
+	pi.on("session_shutdown", async () => { await runtime.shutdown(); await activeStore?.release(); });
 }

@@ -113,6 +113,7 @@ test("branch restoration only uses its tool checkpoints and interrupts stale run
 	await runtime.shutdown();
 	await runtime.restore([entry]);
 	assert.equal(runtime.get(id).status, "stopped");
+	assert.equal(runtime.get(id).activity!.finishedAt, details.children[0]!.activity!.lastActivityAt, "an interrupted turn does not accumulate offline time after restoration");
 	assert.equal(details.children[0]!.status, "running", "restore must not mutate durable entries");
 	await runtime.restore([]);
 	assert.equal(runtime.snapshot().children.length, 0);

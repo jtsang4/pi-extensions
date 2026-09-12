@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import type { Snapshot } from "../extensions/subagent/runtime.ts";
 
 const repo = resolve(import.meta.dirname, "..");
+const piCli = process.env.PI_E2E_PI_BIN ?? "pi";
 const artifacts = await mkdtemp(`${tmpdir()}/pi-subagent-crash-`);
 console.log(`Artifacts: ${artifacts}`);
 const sessionPath = `${artifacts}/parent-session.jsonl`;
@@ -18,7 +19,7 @@ const prefix = ["--offline", "--no-extensions", "-e", repo, "-e", `${repo}/tests
 const steps = [{ action: "spawn", role: "scout", task: `E2E_READ_BLOCK ${dataFile}`, timeoutMs: 60_000 }];
 const args = [...prefix, "-p", `E2E_PARENT ${JSON.stringify(steps)}`];
 const env = { ...process.env, PI_SUBAGENT_STORAGE_DIR: `${artifacts}/subagents`, PI_E2E_PARENT_SETTLE_MS: "10000" };
-const child = spawn("pi", args, { cwd: repo, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+const child = spawn(piCli, args, { cwd: repo, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
 let stdout = "", stderr = "";
 child.stdout.on("data", (data) => { stdout += data; });
 child.stderr.on("data", (data) => { stderr += data; });
@@ -54,7 +55,7 @@ try {
 	const persisted = await readFile(`${archived.archiveDir}/events.jsonl`, "utf8");
 	assert.match(persisted, /E2E_CRASH_PROGRESS/);
 	for (const line of persisted.trim().split("\n")) assert.doesNotThrow(() => JSON.parse(line));
-	const resumed = spawnSync("pi", [...prefix, "-p", 'E2E_PARENT [{"action":"list"}]'], {
+	const resumed = spawnSync(piCli, [...prefix, "-p", 'E2E_PARENT [{"action":"list"}]'], {
 		cwd: repo, env: { ...env, PI_E2E_PARENT_SETTLE_MS: "0" }, encoding: "utf8", timeout: 15_000,
 	});
 	await writeFile(`${artifacts}/restored.jsonl`, resumed.stdout);
@@ -71,5 +72,5 @@ try {
 	clearTimeout(timer);
 	kill();
 	await closed;
-	await Promise.all([writeFile(`${artifacts}/stdout.jsonl`, stdout), writeFile(`${artifacts}/stderr.log`, stderr), writeFile(`${artifacts}/command.json`, JSON.stringify({ args, pid: child.pid }))]);
+	await Promise.all([writeFile(`${artifacts}/stdout.jsonl`, stdout), writeFile(`${artifacts}/stderr.log`, stderr), writeFile(`${artifacts}/command.json`, JSON.stringify({ executable: piCli, args, pid: child.pid }))]);
 }

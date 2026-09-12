@@ -1,6 +1,12 @@
 # Subagent validation record
 
-Validated on 2026-09-12 with Node 24.15.0, Pi CLI 0.85.1, and local Pi SDK 0.82.1.
+Historical validation on 2026-09-12. Superseded by the
+[2026-09-13 adversarial audit](subagent-audit.md), including 79 tests, archive
+coverage, two CLI versions, useful real-model work and performance measurements.
+
+Correction: Node was 24.15.0 and the local Pi SDK was 0.82.1. Although the globally
+installed CLI was 0.85.1, the commands below used `pnpm exec`, which selected the
+locked dependency's CLI 0.82.1. The new audit explicitly selects both binaries.
 The local package entry point was `/Users/jtsang/Documents/workspace/github/jtsang4/pi-extensions`; the extension entry point was
 `/Users/jtsang/Documents/workspace/github/jtsang4/pi-extensions/extensions/subagent/index.ts`.
 

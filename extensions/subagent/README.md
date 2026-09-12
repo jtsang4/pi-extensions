@@ -8,8 +8,12 @@ conversation for follow-up tasks. It works in TUI, JSON and RPC modes.
 {"action":"spawn","role":"scout","task":"Find the retry implementation and report its edge cases."}
 {"action":"spawn","role":"worker","task":"Add retry tests in tests/retry.test.ts only; report the results."}
 {"action":"wait","ids":["<first-id>","<second-id>"],"waitMs":10000}
+{"action":"wait","ids":["<first-id>","<second-id>"],"waitFor":"any"}
 {"action":"send","id":"<first-id>","task":"Check whether cancellation interrupts the retry delay."}
+{"action":"result","id":"<first-id>"}
+{"action":"result","id":"<first-id>","offset":16383}
 {"action":"stop","id":"<second-id>"}
+{"action":"forget","id":"<second-id>"}
 {"action":"list"}
 ```
 
@@ -25,24 +29,55 @@ conversation for follow-up tasks. It works in TUI, JSON and RPC modes.
 - `send` steers a running child after its active tool batch, or starts a new
   turn with the saved conversation when idle. During initialization or stopping,
   it returns an error so the parent can wait and retry. It does not interrupt the
-  current tool; use `stop` for cancellation.
-- `wait` waits for **all** selected IDs; omit IDs to wait for all children.
+  current tool; use `stop` for cancellation. A send waiting for final archive
+  writes can be cancelled before admission; already accepted work stays accepted.
+  Undelivered queued messages are reported explicitly when a turn ends.
+- `wait` defaults to **all** selected IDs; omit IDs to select all children.
+  Set `waitFor: "any"` to return when at least one selected child is terminal,
+  so fast results can unlock dependent work while slower children keep running.
+  An already-terminal selected ID returns immediately; pass only remaining
+  running IDs on subsequent waits to avoid repeated immediate returns.
   `waitMs` defaults to 10 seconds and is capped at 60 seconds. A wait timeout or
   cancelled wait leaves children running. Inspect `status` and wait again.
 - `stop` is idempotent. Terminal states are `completed`, `failed`, or `stopped`;
   model errors, missing terminal replies, and output-token exhaustion are never
   reported as successful completion. Child failures are data in the management
   tool's result; invalid management operations throw a tool error.
+- `list` exposes bounded progress text and `activity`: start/end/last-activity
+  timestamps, elapsed milliseconds, model turns, tool calls, last tool, queued
+  message count, and provider-reported input/output/cache tokens and cost. These
+  counters describe the current turn and reset for an idle follow-up. Reported
+  assistant usage excludes SDK summarization calls and is not a billing ledger.
+  Restored interrupted turns stop their elapsed-time counter at the last observed
+  activity rather than including time spent offline.
+- `result` reads a persistent child's full report in pages of at most 16 KiB and
+  400 lines. Start at offset `0` (the default), then use the returned `nextOffset`
+  byte offset; stop when it is absent. For example, `16383` above is valid only if
+  the preceding page returned that value. UTF-8 characters remain intact. Reading
+  a report requires no parent filesystem tool, does not load continuation history,
+  and never advances a branch to an uncollected checkpoint. Ephemeral children
+  have no full archive; use their bounded `wait`/`list` summary instead.
+- `forget` removes a terminal child from the current branch, freeing a record slot
+  and its in-memory state. It does not delete archive files or affect snapshots
+  on older branches. Stop running children before forgetting them.
 - Four turns can run concurrently, including initialization. There are at most
-  32 child records per branch; reuse IDs instead of spawning indefinitely.
+  32 child records per branch; continue related work with `send`, or `forget`
+  finished unrelated work before starting fresh contexts.
   Each child turn has a default five-minute deadline (`timeoutMs`: 1–600 seconds)
   and 32 model turns (`maxTurns`: 1–100). A deadline or exhausted turn budget
   stops the child. Follow-ups receive a fresh budget.
+
+`role`, `model`, `timeoutMs`, and `maxTurns` configure `spawn`; `waitMs` and
+`waitFor` configure `wait`; `offset` configures `result`. Fields intended for
+another action and simultaneous `id`/`ids` are rejected instead of ignored.
 
 The child returns a text summary, capped at 16 KiB/400 lines. `list` provides
 short previews; targeted `wait` retrieves the larger summary. Completion is
 pull-based; it does not inject a new parent turn. Parent shutdown, reload,
 session replacement, forking, and tree navigation stop active children.
+The last nonempty assistant text is retained even when the final message is empty
+or the provider fails. Streaming previews are throttled; errors still report a
+failed/stopped status, and a wholly empty textual report is not successful work.
 
 ## Run archives
 
@@ -55,7 +90,7 @@ directory:
   meta.json          # Task, model, tool scope, status, timestamps, working directory
   events.jsonl       # Completed messages, tool starts/results, compactions, lifecycle
   result.md          # Full final text, without the parent summary's truncation
-  checkpoint.json    # Immutable continuation history for this particular run
+  checkpoint.json    # Immutable continuation history, once an SDK session ran
   artifacts/        # Worker reports/logs and copies of oversized Bash output
 ```
 
@@ -67,12 +102,17 @@ in their assigned artifact directory; project deliverables stay at their request
 paths. Writing arbitrary worker artifacts still depends on the task and available
 tools. The archive automatically copies full output files created by Pi's Bash
 tool when its response exceeds the tool's output limit.
+Run-specific paths are appended to the new task rather than the system prompt,
+preserving a common prompt prefix across follow-ups when model, tools, and project
+instructions stay the same. Provider cache behavior is still provider-dependent.
 
-Version 2 tool-result `details` keep child configuration, bounded summaries, and
+Version 2 tool-result `details` keep child configuration, 2 KiB saved previews, and
 references to immutable checkpoints. Full child conversations are stored once per
-run instead of being repeated in every parent poll. Reload and tree navigation
-load only the checkpoint referenced by the active branch, never a newer run found
-on disk. Version 1 inline checkpoints from earlier releases remain readable.
+run instead of being repeated in every parent poll. Completed persistent children
+release their full history from memory. Reload and tree navigation check references
+without reading every conversation body; only a continued child loads its exact
+checkpoint, never a newer run found on disk. A restored child's `wait` summary is
+its saved preview; use `result` for more. Version 1 inline checkpoints remain readable.
 
 A checkpoint showing `running` becomes `stopped`; it never silently restarts work.
 Use `wait` or `list` to collect completed results before leaving the session so a
@@ -82,9 +122,11 @@ forcibly terminated, already-written events remain available; the last queued
 writes and final checkpoint may be absent. This is diagnostic retention, not
 automatic recovery or a guarantee against power loss.
 
-Persistent checkpoints do not have the old 2 MB history limit. Missing, expired,
-or corrupt checkpoints leave the summary visible and disable continuation with
-an explicit error. Copy the corresponding archive directories along with a parent
+Persistent checkpoints do not have the old 2 MB history limit. Missing or expired
+checkpoints are detected on restoration; body corruption is detected when continued.
+Either leaves the summary visible and disables continuation with an explicit error.
+Startup failures preserve the previous checkpoint rather than replacing it with an
+empty history. Copy the corresponding archive directories along with a parent
 session when moving it to another machine. Checkpoints include model usage in
 assistant history; child usage is not added to Pi's main-session cost counter.
 Archive write failures mark the child as failed and are reported to the parent.
@@ -104,12 +146,21 @@ Set these environment variables before starting Pi:
 | `PI_SUBAGENT_RETENTION_DAYS` | `30` | Remove inactive runs older than this many days; `0` disables age cleanup. |
 | `PI_SUBAGENT_MAX_STORAGE_MB` | `1024` | Remove oldest inactive runs when archives exceed this many MiB; `0` disables capacity cleanup. |
 
-Cleanup runs on persistent session initialization, reload, and tree navigation.
+Cleanup runs on persistent session initialization, reload, and tree navigation,
+at most once per five minutes in the loaded extension unless settings change.
+Disabling both limits skips traversal entirely; age-only cleanup does not size files.
 It removes only recognized run directories, leaving unrelated files and symlinks
-alone. Runs owned by live Pi processes and archives referenced by the active
-session are protected. Small `.lease-<pid>.json` files at the parent-session level
-also protect resumed archives from other Pi processes' cleanup for the current
-process's lifetime. Dead leases are cleaned automatically. The capacity setting
+alone. Running turns and archives held by an active session are protected. Small
+`.lease-<pid>-<holder-id>.json` files at the parent-session level protect resumed
+archives from other Pi processes. Holders release their own leases on session
+replacement, reload, and shutdown; multiple holders in one process are independent.
+Legacy process leases remain recognized, and dead leases are cleaned automatically.
+
+Deletion first moves a run to `<run-id>.pruning` and rechecks leases, so a session
+that acquired the run during the initial scan can preserve it. Interrupted cleanup
+moves can be recovered when the same run is read; this never reruns child work.
+Archives already removed by retention cannot be recovered. Empty managed
+directories are reclaimed as well. The capacity setting
 is a soft limit while protected runs remain active. Closed sessions' archives can
 expire; their parent session then retains summaries but cannot continue those
 children. Set both limits to `0` to retain archives until manually removed.

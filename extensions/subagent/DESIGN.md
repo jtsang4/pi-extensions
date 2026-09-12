@@ -19,21 +19,31 @@ avoid managing a second Pi installation or parsing CLI output in production.
 
 Persistence has two responsibilities: parent tool-result snapshots choose the
 active branch's continuation, while global run archives retain execution evidence.
-Version 2 snapshots contain immutable run references and bounded summaries; full
+Version 2 snapshots contain immutable run references and 2 KiB previews; full
 compacted child messages live in that run's checkpoint. Each idle follow-up creates
 a fresh SDK session and a unique run directory. A running snapshot still references
 the previous checkpoint, including while final archive writes are pending. Loading
 an old branch never reads a newer run's history. Legacy version 1 inline snapshots
 remain readable, and ephemeral parent sessions retain the inline behavior.
+Completed persistent children drop history bodies from memory. Restoration checks
+file availability; loading and message validation happen only for the child being
+continued. An initialization failure keeps its previous checkpoint. The model-facing
+response can contain a larger live summary than the compact snapshot used for
+persistence. The `result` action reads immutable report pages without adopting any
+newer continuation state.
 
 The storage module owns directory creation, serial event writes, immutable final
 reports/checkpoints, oversized Bash output copies, and retention. It performs no
 I/O until session startup or use. Archives use `~/.pi/subagents/`, outside Pi's
 official agent directory, with private directories and metadata files. Each run's
 metadata records its parent session, branch, task, model, tools, and process ID.
-Live owner processes and process leases for reopened sessions protect runs from
-age/capacity pruning. Cleanup recognizes only this format and ignores symlinks and
-foreign directories; it is a soft budget, not a quota enforced during execution.
+Live running processes and individual session-holder leases protect runs from
+age/capacity pruning. Lease handoff acquires the new holder before releasing the
+old one; a failed handoff fails initialization. Cleanup recognizes only this format
+and ignores symlinks and foreign directories. It first renames candidates into
+recoverable quarantine and rechecks leases before deletion, closing the demonstrated
+read-versus-delete race. This is a soft budget, not a quota enforced during execution.
+Maintenance is throttled, and fully disabled cleanup performs no traversal.
 
 Final archival happens during child settlement without a parent collection call.
 Event appends preserve completed progress across a process crash, but are not
@@ -41,6 +51,18 @@ fsync-backed and may lose their queued tail. Restoration marks an interrupted ru
 as stopped and exposes its archive path; it never adopts uncollected future history
 or reruns potentially mutating work. Missing checkpoints fail explicitly. Archive
 failures fail the child and retain a bounded inline recovery history when possible.
+Useful partial text survives terminal empty messages and provider failures; failures
+remain failures. Progress/usage does not create extra parent turns. Wait-any and
+explicit record removal support long workflows without repeated short polling or
+reusing unrelated conversations. Cancelling a send waiting for settlement prevents
+late admission, while a successfully queued message remains accepted.
+
+The system prompt does not contain per-run paths. The new task carries those paths
+after the previous conversation, retaining a common model prompt prefix. Actual
+cache hits depend on the provider. Model/thinking remain pinned, and each SDK session
+rechecks current built-in tool origins as well as activation. First tool use also
+initializes state for SDK hosts whose reload path omits `session_start` without UI
+bindings; initialization failures cannot silently fall back to an empty runtime.
 
 Failure-oriented review produced regression coverage for synchronous capacity
 reservation, wait cancellation, timeout versus cancellation semantics, late
@@ -57,10 +79,10 @@ closed to future tasks.
 pnpm test
 pnpm exec tsc --noEmit
 pnpm check
-pnpm exec node --experimental-strip-types tests/subagent.e2e.ts
-pnpm exec node --experimental-strip-types tests/subagent.branch-e2e.ts
-pnpm exec node --experimental-strip-types tests/subagent.crash-e2e.ts
+pnpm test:subagent:e2e
+pnpm exec node --experimental-strip-types tests/subagent.performance.ts
 pnpm exec node --experimental-strip-types tests/subagent.live.ts deepseek/deepseek-v4-flash --archive
+pnpm exec node --experimental-strip-types tests/subagent.workflow-live.ts deepseek/deepseek-v4-flash
 git diff --check
 ```
 
@@ -74,6 +96,11 @@ limits, model-turn limits, cross-process restoration, automatic uncollected repo
 archival, worker artifacts, full oversized output, ephemeral non-persistence, and
 bash descendant cleanup on stop, timeout, and parent shutdown. Each run prints an artifact directory with
 the exact command, stdout JSONL, stderr, exit status, and process IDs.
+The CLI test records its executable and version. By default `pnpm exec` selects the
+locked development Pi CLI (0.82.1), not a globally installed CLI. Set
+`PI_E2E_PI_BIN=/absolute/path/to/pi` for an additional host-compatibility run; the
+extension still loads from the working tree. The same matrix was also exercised
+against the installed Pi CLI 0.85.1.
 
 `subagent.branch-e2e.ts` uses the real SDK's tree navigation with the complete
 local package to verify active-branch isolation, stale-running restoration,
@@ -90,6 +117,18 @@ configured credentials and consumes model tokens. These checks passed with
 network requests. Storage regressions cover oversized history, queued-write and
 creation failures, missing/corrupt checkpoints, polling during settlement, path
 validation, retention, and protection of resumed archives.
+
+`subagent.policy-e2e.ts` exercises real SDK trust changes, model pinning, tool
+removal/override, system-prompt stability, reload and lease handoff. The real-model
+workflow test assigns two independent code fixes, verifies unchanged test oracles
+from outside the workers, and checks that the parent reads both reports before
+integrating the result. `subagent.performance.ts` compares the same archive workload
+against an explicitly supplied historical source directory. Findings, measurements,
+and the audit matrix are recorded in `tests/subagent-audit.md` in the repository.
+
+The `Verify` GitHub Actions workflow runs deterministic checks and all offline E2E
+scenarios on Node 22.19.0 and 24, retaining their raw artifacts. Provider-backed tests
+are explicit local runs and do not require CI credentials.
 
 The first E2E turn-budget run exposed a fixture bug: its immediate scripted
 responses ignored the cancelled signal, causing an artificial infinite loop.

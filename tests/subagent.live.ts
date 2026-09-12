@@ -9,13 +9,14 @@ import type { Snapshot } from "../extensions/subagent/runtime.ts";
 const model = process.argv[2];
 if (!model) throw new Error("Usage: pnpm exec node --experimental-strip-types tests/subagent.live.ts provider/model-id [--archive]");
 const repo = resolve(import.meta.dirname, "..");
+const piCli = process.env.PI_E2E_PI_BIN ?? "pi";
 const artifacts = await mkdtemp(`${tmpdir()}/pi-subagent-live-`);
 const archive = process.argv.includes("--archive");
-const assignedTask = archive ? "Create one worker with this task: Your system prompt provides an artifacts directory. Use write to save live.txt there containing exactly E2E_ARTIFACT_LIVE. Then reply exactly E2E_CHILD_OK." : "Create one scout with this task: Reply exactly E2E_CHILD_OK.";
+const assignedTask = archive ? "Create one worker with this task: Your task's run context provides an artifacts directory. Use write to save live.txt there containing exactly E2E_ARTIFACT_LIVE. Then reply exactly E2E_CHILD_OK." : "Create one scout with this task: Reply exactly E2E_CHILD_OK.";
 const prompt = `E2E_SUBAGENT_LIVE: Use pi_subagent spawn. ${assignedTask} Then use pi_subagent wait for that id until terminal. If completed, send to the same id this follow-up: What exact marker did you reply previously? Reply that marker followed by E2E_FOLLOWUP_OK. Wait until terminal again. Finally reply E2E_PARENT_OK only if both turns completed. Do not call other tools yourself or spawn additional children.`;
 const args = ["--offline", "--no-extensions", "-e", repo, "--no-skills", "--no-prompt-templates", "--no-context-files",
 	...(archive ? ["--session", `${artifacts}/parent-session.jsonl`] : ["--no-session"]), "--mode", "json", "--tools", `pi_subagent,read,grep,find,ls${archive ? ",write" : ""}`, "--model", model, "--thinking", "off", "-p", prompt];
-const child = spawn("pi", args, { cwd: repo, env: { ...process.env, PI_SUBAGENT_STORAGE_DIR: `${artifacts}/subagents` }, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+const child = spawn(piCli, args, { cwd: repo, env: { ...process.env, PI_SUBAGENT_STORAGE_DIR: `${artifacts}/subagents` }, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
 let stdout = "", stderr = "", expired = false;
 child.stdout.on("data", (data) => { stdout += data; });
 child.stderr.on("data", (data) => { stderr += data; });
@@ -27,7 +28,7 @@ const timer = setTimeout(() => {
 const code = await new Promise<number | null>((done, reject) => { child.on("close", done); child.on("error", reject); }).finally(() => clearTimeout(timer));
 await Promise.all([
 	writeFile(`${artifacts}/stdout.jsonl`, stdout), writeFile(`${artifacts}/stderr.log`, stderr),
-	writeFile(`${artifacts}/command.json`, JSON.stringify({ cwd: repo, executable: "pi", args, pid: child.pid, code, expired })),
+	writeFile(`${artifacts}/command.json`, JSON.stringify({ cwd: repo, executable: piCli, args, pid: child.pid, code, expired })),
 ]);
 console.log(`Artifacts: ${artifacts}`);
 assert.equal(expired, false, "provider-backed run exceeded 180 seconds");

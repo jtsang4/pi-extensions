@@ -1,14 +1,18 @@
 /** Run: pnpm exec node --experimental-strip-types tests/subagent.e2e.ts */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, readFile, writeFile, lstat } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, readFile, writeFile, lstat, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { Snapshot } from "../extensions/subagent/runtime.ts";
 
 const repo = resolve(import.meta.dirname, "..");
+const piCli = process.env.PI_E2E_PI_BIN ?? "pi";
 const artifacts = await mkdtemp(`${tmpdir()}/pi-subagent-e2e-`);
 console.log(`Artifacts: ${artifacts}`);
+const version = spawnSync(piCli, ["--version"], { encoding: "utf8", timeout: 10_000 });
+assert.equal(version.status, 0, version.stderr);
+console.log(`Pi CLI: ${piCli} (${version.stdout.trim()})`);
 const dataFile = `${artifacts}/input.txt`;
 const archiveRoot = `${artifacts}/subagents`;
 await writeFile(dataFile, "E2E_FILE_CONTENT\n");
@@ -18,8 +22,8 @@ async function run(name: string, steps: Record<string, unknown>[], extra: string
 	const args = ["--offline", "--no-extensions", "-e", repo, "-e", `${repo}/tests/fixtures/subagent-provider.ts`,
 		"--no-skills", "--no-prompt-templates", "--no-context-files", ...(extra.includes("--session") ? [] : ["--no-session"]), "--mode", "json", "--thinking", "off",
 		"--model", "subagent-fixture/scripted", "--tools", "pi_subagent,read,grep,find,ls,bash,write,edit", ...extra, "-p", `E2E_PARENT ${JSON.stringify(steps)}`];
-	await writeFile(`${artifacts}/${name}.command.json`, JSON.stringify({ cwd: repo, executable: "pi", args }));
-	const child = spawn("pi", args, { cwd: repo, env: { ...process.env, PI_SUBAGENT_STORAGE_DIR: archiveRoot, PI_E2E_PARENT_SETTLE_MS: String(parentDelayMs) }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+	await writeFile(`${artifacts}/${name}.command.json`, JSON.stringify({ cwd: repo, executable: piCli, version: version.stdout.trim(), args }));
+	const child = spawn(piCli, args, { cwd: repo, env: { ...process.env, PI_SUBAGENT_STORAGE_DIR: archiveRoot, PI_E2E_PARENT_SETTLE_MS: String(parentDelayMs) }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
 	let stdout = "", stderr = "";
 	child.stdout.on("data", (data) => { stdout += data; });
 	child.stderr.on("data", (data) => { stderr += data; });
@@ -86,12 +90,35 @@ const restricted = await run("parent-tool-restriction", [spawnTask("E2E_TOOLS", 
 assert.deepEqual(JSON.parse(lastChild(restricted).output).tools, ["read"]);
 console.log("PASS worker cannot expand the parent built-in allowlist");
 
+const early = await run("wait-any", [spawnTask("E2E_BLOCK"), spawnTask("E2E_FAST"), { action: "wait", waitFor: "any", waitMs: 10_000 }, { action: "stop", id: "$0" }]);
+assert.equal(early[2]!.details.children[0]!.status, "running");
+assert.equal(early[2]!.details.children[1]!.status, "completed");
+assert.ok(early[2]!.details.children[0]!.activity!.lastActivityAt >= early[2]!.details.children[0]!.activity!.startedAt);
+console.log("PASS wait-any exposes early result while another child remains live");
+
+const cancelledSteer = await run("undelivered-steer", [spawnTask("E2E_BASH sleep 2", { role: "worker" }),
+	{ action: "wait", waitMs: 100 }, { action: "send", id: "$0", task: "E2E_NOT_DELIVERED" }, { action: "stop", id: "$0" }]);
+assert.equal(lastChild(cancelledSteer).status, "stopped");
+const cancelledChild = lastChild(cancelledSteer);
+if (cancelledChild.activity!.queuedMessages > 0) assert.match(cancelledChild.error!, /not delivered/);
+else assert.ok(cancelledChild.history.some((message) => message.role === "user" && JSON.stringify(message.content).includes("E2E_NOT_DELIVERED")), "accepted steering must be preserved in continuation or explicitly reported undelivered");
+assert.ok(lastChild(cancelledSteer).activity!.toolCalls >= 1);
+console.log("PASS cancellation preserves accepted input or reports undelivered messages explicitly");
+
+const partial = await run("partial-provider-error", [spawnTask(`E2E_REPORT_THEN_ERROR ${dataFile}`), wait]);
+assert.equal(lastChild(partial).status, "failed");
+assert.equal(lastChild(partial).output, "E2E_USEFUL_PROGRESS");
+assert.equal(lastChild(partial).activity!.modelTurns, 2);
+assert.equal(lastChild(partial).activity!.lastTool, "read");
+console.log("PASS partial report and activity survive an empty provider error");
+
 for (const [name, task, extra, expected] of [
 	["timeout", "E2E_BLOCK", { timeoutMs: 1000 }, "stopped"],
 	["provider-error", "E2E_FAIL", {}, "failed"],
 	["length", "E2E_LENGTH", {}, "failed"],
 	["turn-limit", `E2E_LOOP ${dataFile}`, { maxTurns: 2 }, "stopped"],
 	["large", "E2E_LARGE", {}, "completed"],
+	["empty-report", "E2E_EMPTY_REPORT", {}, "failed"],
 ] as const) {
 	const results = await run(name, [spawnTask(task, extra), wait]);
 	assert.equal(lastChild(results).status, expected, name);
@@ -102,6 +129,13 @@ for (const [name, task, extra, expected] of [
 const invalid = await run("invalid", [{ action: "spawn", task: " " }, { action: "send", id: "unknown", task: "hello" }, { action: "spawn", task: "hello", model: "missing/model" }]);
 assert.ok(invalid.every((result) => result.isError));
 console.log("PASS invalid requests");
+const irrelevant = await run("action-parameters", [spawnTask("E2E_VALID"), wait,
+	{ action: "send", id: "$0", task: "MUST_NOT_RUN", model: "subagent-fixture/alternative" },
+	{ action: "wait", id: "$0", ids: ["$0"] }, { action: "list" }]);
+assert.equal(irrelevant[2]!.isError, true);
+assert.equal(irrelevant[3]!.isError, true);
+assert.equal(lastChild(irrelevant).turn, 1, "invalid action parameters must not silently start work");
+console.log("PASS action-specific parameters reject ignored overrides and ambiguous ID sets");
 await assert.rejects(lstat(archiveRoot), { code: "ENOENT" });
 console.log("PASS --no-session creates no global archive");
 
@@ -115,6 +149,12 @@ console.log("PASS durable restoration in a new CLI process");
 assert.deepEqual(lastChild(restored).history, [], "persistent parent results contain references instead of child history");
 assert.ok(lastChild(restored).checkpoint);
 assert.notDeepEqual(lastChild(persisted).checkpoint, lastChild(restored).checkpoint);
+
+const scopedFollowup = await run("followup-restriction", [{ action: "send", id: lastChild(persisted).id, task: "E2E_RESTRICTED_FOLLOWUP" }, wait], ["--session", sessionPath, "--tools", "pi_subagent"]);
+assert.equal(lastChild(scopedFollowup).status, "completed");
+assert.deepEqual(JSON.parse(lastChild(scopedFollowup).output).tools, []);
+assert.equal(lastChild(scopedFollowup).task, "E2E_RESTRICTED_FOLLOWUP");
+console.log("PASS resumed child rechecks a reduced parent tool allowlist");
 
 const uncollected = await run("uncollected", [spawnTask("E2E_NO_WAIT_RESULT")], ["--session", `${artifacts}/session-uncollected.jsonl`], 1000);
 const uncollectedDir = lastChild(uncollected).archiveDir!;
@@ -132,6 +172,18 @@ const largeArchive = await run("large-archive", [spawnTask("E2E_LARGE"), wait], 
 assert.equal(await readFile(`${lastChild(largeArchive).archiveDir}/result.md`, "utf8"), "大".repeat(30_000));
 assert.ok(Buffer.byteLength(lastChild(largeArchive).output) < 16_500);
 console.log("PASS assigned artifact directory and untruncated archived report");
+
+await rename(lastChild(largeArchive).archiveDir!, `${lastChild(largeArchive).archiveDir}.pruning`);
+const reportPages = await run("report-pages", [{ action: "result", id: lastChild(largeArchive).id },
+	{ action: "result", id: lastChild(largeArchive).id, offset: "$0.nextOffset" },
+	{ action: "forget", id: lastChild(largeArchive).id }, { action: "list" }], ["--session", `${artifacts}/session-large.jsonl`, "--tools", "pi_subagent"]);
+const page = (index: number) => JSON.parse(reportPages[index]!.content[0]!.text)[0].result;
+assert.equal(page(0).text, "大".repeat(5461));
+assert.equal(page(1).offset, page(0).nextOffset);
+assert.equal(page(1).text, "大".repeat(5461));
+assert.deepEqual(reportPages.at(-1)!.details.children, []);
+assert.equal(await readFile(`${lastChild(largeArchive).archiveDir}/result.md`, "utf8"), "大".repeat(30_000));
+console.log("PASS interrupted-cleanup recovery, report pagination without filesystem tools, and forget keeps files");
 
 const bashArchive = await run("bash-output-archive", [spawnTask("E2E_BASH node -e 'console.log(\"X\".repeat(80000))'", { role: "worker" }), wait], ["--session", `${artifacts}/session-bash-output.jsonl`]);
 assert.equal(lastChild(bashArchive).status, "completed");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile, mkdir, readdir, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, mkdir, readdir, rename, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSessionEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -48,7 +48,7 @@ test("archives settle without parent collection and snapshots contain references
 	assert.equal(await readFile(join(child.archiveDir!, "result.md"), "utf8"), "ARCHIVE_DONE");
 	assert.equal(JSON.parse(await readFile(join(child.archiveDir!, "meta.json"), "utf8")).child.status, "completed");
 	const events = (await readFile(join(child.archiveDir!, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-	assert.ok(events.some((event) => event.event?.message?.content === "ARCHIVE_FIRST"));
+	assert.ok(events.some((event) => typeof event.event?.message?.content === "string" && event.event.message.content.startsWith("ARCHIVE_FIRST\n\n[Subagent run context]\n") && event.event.message.content.includes(join(child.archiveDir!, "artifacts"))));
 	assert.equal(events.at(-1).type, "run_end");
 	assert.equal((await store.readHistory(child.checkpoint!)).length, 2);
 	assert.deepEqual(runtime.snapshot().children[0]!.history, []);
@@ -77,8 +77,8 @@ test("continuation and branch forks use immutable checkpoints and unique run IDs
 	await runtime.send(id, "OTHER_BRANCH", async (child) => session(child));
 	await runtime.wait([id], 5000);
 	assert.notDeepEqual(runtime.get(id).checkpoint, futureRef);
-	assert.match(JSON.stringify(runtime.get(id).history), /OTHER_BRANCH/);
-	assert.doesNotMatch(JSON.stringify(runtime.get(id).history), /FUTURE_BRANCH/);
+	assert.match(JSON.stringify(await store.readHistory(runtime.get(id).checkpoint!)), /OTHER_BRANCH/);
+	assert.doesNotMatch(JSON.stringify(await store.readHistory(runtime.get(id).checkpoint!)), /FUTURE_BRANCH/);
 	assert.doesNotMatch(JSON.stringify(await store.readHistory(firstRef)), /OTHER_BRANCH|FUTURE_BRANCH/);
 });
 
@@ -94,6 +94,7 @@ test("large histories remain resumable on disk and complete output is preserved"
 	assert.equal(await readFile(join(child.archiveDir!, "result.md"), "utf8"), output);
 	assert.ok(Buffer.byteLength(JSON.stringify(await store.readHistory(child.checkpoint!))) > 2_000_000);
 	assert.ok(Buffer.byteLength(JSON.stringify(runtime.snapshot())) < 20_000);
+	assert.ok(Buffer.byteLength(runtime.snapshot().children[0]!.output) < 2200, "parent polls store a compact preview, with the full result in its archive");
 });
 
 test("polling during archive settlement keeps the previous checkpoint until writes finish", async (t) => {
@@ -135,6 +136,10 @@ test("missing or corrupt checkpoints disable continuation without reading a newe
 	const path = join(store.path(runtime.get(id).checkpoint!), "checkpoint.json");
 	await writeFile(path, "broken JSON");
 	await runtime.restore([snapshot], context);
+	let prompted = false;
+	await runtime.send(id, "must not run from corrupt history", async (child) => { prompted = true; return session(child); });
+	await runtime.wait([id], 5000);
+	assert.equal(prompted, false);
 	assert.equal(runtime.get(id).resumable, false);
 	assert.match(runtime.get(id).error!, /Cannot restore/);
 	await assert.rejects(runtime.send(id, "again", async (child) => session(child)), /checkpoint/);
@@ -158,7 +163,7 @@ test("version 1 inline checkpoints upgrade and ephemeral runs create no archive"
 	await upgraded.send(id, "UPGRADED", async (child) => session(child));
 	await upgraded.wait([id], 5000);
 	assert.equal(upgraded.get(id).status, "completed");
-	assert.match(JSON.stringify(upgraded.get(id).history), /ARCHIVE_FIRST/);
+	assert.match(JSON.stringify(await context.store.readHistory(upgraded.get(id).checkpoint!)), /ARCHIVE_FIRST/);
 	assert.ok(upgraded.get(id).checkpoint);
 });
 
@@ -209,7 +214,9 @@ test("retention and capacity prune old inactive archives while preserving active
 		const file = join(store.path(ref), "meta.json");
 		const meta = JSON.parse(await readFile(file, "utf8"));
 		await writeFile(file, JSON.stringify({ ...meta, pid, createdAt: time, completedAt: time }));
-		await rm(join(root, parentId, `.lease-${process.pid}.json`));
+		if (pid !== process.pid) {
+			for (const name of await readdir(join(root, parentId))) if (name.startsWith(".lease-")) await rm(join(root, parentId, name));
+		}
 		return store.path(ref);
 	};
 	const old = await create("old", 2147483647);
@@ -237,4 +244,177 @@ test("storage environment defaults and limits are explicit", () => {
 	assert.match(SubagentStorage.fromEnvironment({}).root, /\.pi\/subagents$/);
 	assert.equal(SubagentStorage.fromEnvironment({ PI_SUBAGENT_RETENTION_DAYS: "0", PI_SUBAGENT_MAX_STORAGE_MB: "0" }).maxBytes, 0);
 	assert.throws(() => SubagentStorage.fromEnvironment({ PI_SUBAGENT_RETENTION_DAYS: "garbage" }), /nonnegative/);
+});
+
+test("cold listing and idle children retain no history bodies; only a continued child reads its checkpoint", async (t) => {
+	const { runtime, store, context } = await fixture(t);
+	const ids: string[] = [];
+	for (let i = 0; i < 4; i++) {
+		const id = runtime.spawn(input, async (child) => session(child, `BODY_${i}_` + "x".repeat(500_000)));
+		ids.push(id);
+		await runtime.wait([id], 5000);
+		assert.deepEqual(runtime.get(id).history, []);
+	}
+	let reads = 0;
+	const read = store.readHistory.bind(store);
+	store.readHistory = async (ref) => { reads++; return read(ref); };
+	await runtime.restore([entry(runtime)], context);
+	assert.equal(reads, 0, "restoration must not parse every archived conversation");
+	assert.ok(JSON.stringify(runtime.snapshot()).length < 75_000);
+	await runtime.send(ids[2]!, "ONLY_THIRD", async (child) => {
+		assert.match(JSON.stringify(child.history), /BODY_2_/);
+		assert.doesNotMatch(JSON.stringify(child.history), /BODY_0_|BODY_1_|BODY_3_/);
+		return session(child);
+	});
+	await runtime.wait([ids[2]!], 5000);
+	assert.equal(runtime.get(ids[2]!).status, "completed");
+	assert.equal(reads, 1);
+	assert.deepEqual(runtime.get(ids[2]!).history, []);
+});
+
+test("structurally corrupt history never reaches a child SDK session or replaces its valid checkpoint", async (t) => {
+	const { runtime, context, store } = await fixture(t);
+	const id = runtime.spawn(input, async (child) => session(child));
+	await runtime.wait([id], 5000);
+	const ref = runtime.get(id).checkpoint!;
+	await writeFile(join(store.path(ref), "checkpoint.json"), JSON.stringify({ version: 1, ref, history: [null] }));
+	await runtime.restore([entry(runtime)], context);
+	let created = false;
+	await runtime.send(id, "MUST_NOT_RUN", async (child) => { created = true; return session(child); });
+	await runtime.wait([id], 5000);
+	assert.equal(created, false);
+	assert.equal(runtime.get(id).status, "failed");
+	assert.equal(runtime.get(id).resumable, false);
+	assert.deepEqual(runtime.get(id).checkpoint, ref);
+	await assert.rejects(readFile(join(runtime.get(id).archiveDir!, "checkpoint.json")), { code: "ENOENT" });
+});
+
+test("archive settlement never sends stop or follow-up calls to a disposed SDK session", async (t) => {
+	for (const action of ["stop", "send"] as const) {
+		const { runtime, store } = await fixture(t);
+		let release!: () => void;
+		let started!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const settling = new Promise<void>((resolve) => { started = resolve; });
+		const begin = store.begin.bind(store);
+		let first = true;
+		store.begin = async (...args) => {
+			const archive = await begin(...args);
+			if (first) {
+				first = false;
+				const finish = archive.finish.bind(archive);
+				archive.finish = async (...result) => { started(); await gate; await finish(...result); };
+			}
+			return archive;
+		};
+		let disposed = false;
+		const id = runtime.spawn(input, async (child) => {
+			const childSession = session(child);
+			childSession.dispose = () => { disposed = true; };
+			childSession.abort = async () => { assert.equal(disposed, false, "must not abort after disposal"); };
+			return childSession;
+		});
+		await settling;
+		const operation = action === "stop" ? runtime.stop(id) : runtime.send(id, "SETTLED_FOLLOWUP", async (child) => session(child));
+		release();
+		await operation;
+		await runtime.wait([id], 5000);
+		assert.equal(runtime.get(id).status, "completed");
+		assert.equal(runtime.get(id).turn, action === "stop" ? 1 : 2);
+	}
+});
+
+test("session leases release independently and inactive archives can be reclaimed before Pi exits", async (t) => {
+	const { runtime, root, store } = await fixture(t, { retentionDays: 0, maxBytes: 1 });
+	const id = runtime.spawn(input, async (child) => session(child));
+	await runtime.wait([id], 5000);
+	const ref = runtime.get(id).checkpoint!;
+	const otherSession = new SubagentStorage({ root });
+	await otherSession.checkHistory(ref);
+	await store.release();
+	await store.prune();
+	assert.ok(await readFile(join(store.path(ref), "result.md")), "another live holder still protects this run");
+	await otherSession.release();
+	await store.prune();
+	await assert.rejects(readFile(join(store.path(ref), "result.md")), { code: "ENOENT" });
+	assert.deepEqual(await readdir(root), [], "empty archive directories are also reclaimed");
+});
+
+test("disabled retention performs no archive traversal", async (t) => {
+	const { root } = await fixture(t);
+	const file = join(root, "not-a-directory");
+	await writeFile(file, "archive root deliberately cannot be traversed");
+	await new SubagentStorage({ root: file, retentionDays: 0, maxBytes: 0 }).prune();
+});
+
+test("full result pages preserve Unicode and line boundaries without loading continuation or advancing a branch", async (t) => {
+	const { runtime, store, context } = await fixture(t);
+	const text = "😀汉字\n".repeat(1500) + "x".repeat(40000) + "\nEND";
+	const id = runtime.spawn(input, async (child) => session(child, text));
+	const uncollected = entry(runtime);
+	await runtime.wait([id], 5000);
+	await runtime.restore([uncollected], context);
+	const before = runtime.snapshot();
+	store.readHistory = async () => { throw new Error("report retrieval must never load continuation"); };
+	let recovered = "", offset = 0, pages = 0;
+	for (;;) {
+		const page = await runtime.result(id, offset);
+		assert.ok(Buffer.byteLength(page.text) <= 16_384);
+		assert.ok(page.text.split("\n").length <= 400);
+		assert.doesNotMatch(page.text, /�/);
+		recovered += page.text;
+		pages++;
+		if (page.nextOffset === undefined) break;
+		assert.ok(page.nextOffset > offset);
+		offset = page.nextOffset;
+		assert.ok(pages < 30);
+	}
+	assert.equal(recovered, text);
+	assert.ok(pages > 2);
+	assert.deepEqual(runtime.snapshot(), before);
+	assert.equal(runtime.get(id).status, "stopped");
+	await assert.rejects(runtime.result(id, 1), /UTF-8/);
+	await assert.rejects(runtime.result(id, text.length * 100), /exceeds/);
+	const ref = runtime.get(id).archive!;
+	runtime.forget(id);
+	assert.equal(await readFile(join(store.path(ref), "result.md"), "utf8"), text);
+});
+
+test("a session acquired between cleanup's last observation and deletion retains its archive", async (t) => {
+	const { runtime, root, store } = await fixture(t, { retentionDays: 0, maxBytes: 1 });
+	const id = runtime.spawn(input, async (child) => session(child));
+	await runtime.wait([id], 5000);
+	const ref = runtime.get(id).checkpoint!;
+	await store.release();
+	const observer = store as unknown as { hasActiveLease(parentId: string): Promise<boolean> };
+	const inspect = observer.hasActiveLease.bind(store);
+	let scans = 0, proceed!: () => void, observed!: () => void;
+	const observedLastCheck = new Promise<void>((resolve) => { observed = resolve; });
+	const gate = new Promise<void>((resolve) => { proceed = resolve; });
+	observer.hasActiveLease = async (parentId) => {
+		const alive = await inspect(parentId);
+		if (++scans === 2) { observed(); await gate; }
+		return alive;
+	};
+	const cleanup = store.prune();
+	await observedLastCheck;
+	const resumed = new SubagentStorage({ root });
+	try { assert.equal((await resumed.readHistory(ref)).length, 2); }
+	finally { proceed(); }
+	await cleanup;
+	assert.equal(await readFile(join(store.path(ref), "result.md"), "utf8"), "ARCHIVE_DONE");
+	await resumed.release();
+});
+
+test("a quarantined run left by interrupted cleanup can be restored without adopting another run", async (t) => {
+	const { runtime, root, store } = await fixture(t);
+	const id = runtime.spawn(input, async (child) => session(child));
+	await runtime.wait([id], 5000);
+	const ref = runtime.get(id).checkpoint!;
+	await store.release();
+	await rename(store.path(ref), `${store.path(ref)}.pruning`);
+	const resumed = new SubagentStorage({ root });
+	assert.equal((await resumed.readHistory(ref)).length, 2);
+	assert.equal(await readFile(join(store.path(ref), "result.md"), "utf8"), "ARCHIVE_DONE");
+	await resumed.release();
 });
