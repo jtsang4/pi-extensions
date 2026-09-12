@@ -20,8 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         node: ['22.19.0', '24']
-    env:
-      TMPDIR: ${{ runner.temp }}/subagent-e2e
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -36,7 +34,10 @@ jobs:
         with:
           cache: false
 
-      - run: mkdir -p "$TMPDIR"
+      - name: Prepare E2E evidence directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/subagent-e2e"
+          echo "TMPDIR=$RUNNER_TEMP/subagent-e2e" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
       - run: pnpm test:subagent:e2e

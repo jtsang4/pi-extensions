@@ -73,6 +73,9 @@ the table's baseline concerns describe the starting point, not outstanding work.
    No test processes remain. No dependencies, lockfile changes or build step were
    introduced. GitHub CI runs deterministic verification and E2E on Node 22.19.0
    and 24; exact commit results are available in the repository's Verify checks.
+   Its first push exposed an invalid job-level `runner.temp` reference before
+   any jobs started. Preparing `TMPDIR` in a runner step fixes that context scope;
+   the test commands and their assertions remain unchanged.
 
 Test ownership: `subagent-audit.test.ts` covers output, lifecycle admission,
 wait-any, usage and capacity; `subagent-storage.test.ts` covers storage/races and
