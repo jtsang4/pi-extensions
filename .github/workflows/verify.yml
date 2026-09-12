@@ -2,8 +2,29 @@ name: Verify
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
+    # Keep package skills covered; only repository documentation/instructions skip CI.
+    paths-ignore:
+      - '*.md'
+      - 'extensions/**/*.md'
+      - 'tests/**/*.md'
+      - 'docs/**'
+      - '.agents/**'
+      - '.claude/**'
+      - 'claude/**'
+      - LICENSE
   pull_request:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'extensions/**/*.md'
+      - 'tests/**/*.md'
+      - 'docs/**'
+      - '.agents/**'
+      - '.claude/**'
+      - 'claude/**'
+      - LICENSE
+  workflow_dispatch:
 
 permissions:
   contents: read
