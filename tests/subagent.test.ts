@@ -111,10 +111,10 @@ test("branch restoration only uses its tool checkpoints and interrupts stale run
 	const entry = { type: "message", message: { role: "toolResult", toolName: "pi_subagent", isError: false, details } } as SessionEntry;
 	await tick();
 	await runtime.shutdown();
-	runtime.restore([entry]);
+	await runtime.restore([entry]);
 	assert.equal(runtime.get(id).status, "stopped");
 	assert.equal(details.children[0]!.status, "running", "restore must not mutate durable entries");
-	runtime.restore([]);
+	await runtime.restore([]);
 	assert.equal(runtime.snapshot().children.length, 0);
 	assert.throws(() => runtime.get(id), /Unknown/);
 });

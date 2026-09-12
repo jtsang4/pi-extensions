@@ -5,6 +5,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { SubagentRuntime, bounded, type Child } from "./runtime.ts";
+import { SubagentStorage } from "./storage.ts";
+import { join } from "node:path";
 
 const ROLES = {
 	scout: ["read", "grep", "find", "ls"],
@@ -13,6 +15,28 @@ const ROLES = {
 
 export default function subagent(pi: ExtensionAPI): void {
 	const runtime = new SubagentRuntime();
+	let initializationError: unknown;
+	const restore = async (ctx: ExtensionContext) => {
+		initializationError = new Error("Subagent storage is initializing.");
+		try {
+			await runtime.shutdown();
+			const store = ctx.sessionManager.getSessionFile() ? SubagentStorage.fromEnvironment() : undefined;
+			await runtime.restore(ctx.sessionManager.getBranch(), store ? { store, parentId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, branchId: ctx.sessionManager.getLeafId() } : undefined);
+			if (store) {
+				const parents = new Set([ctx.sessionManager.getSessionId()]);
+				for (const child of runtime.snapshot().children) {
+					if (child.checkpoint) parents.add(child.checkpoint.parentId);
+					if (child.archive) parents.add(child.archive.parentId);
+				}
+				try {
+					for (const parent of parents) await store.protect(parent);
+					await store.prune(Date.now(), parents);
+				}
+				catch (error) { if (ctx.hasUI) ctx.ui.notify(`Subagent archive cleanup failed: ${String(error)}`, "warning"); }
+			}
+			initializationError = undefined;
+		} catch (error) { initializationError = error; throw error; }
+	};
 	const factory = (ctx: ExtensionContext) => async (child: Child) => {
 		const model = ctx.modelRegistry.find(child.model.provider, child.model.id);
 		if (!model) throw new Error(`Unavailable subagent model: ${child.model.provider}/${child.model.id}`);
@@ -28,6 +52,7 @@ export default function subagent(pi: ExtensionAPI): void {
 			systemPromptOverride: () => undefined,
 			appendSystemPromptOverride: () => [
 				`You are a ${child.role} subagent handling a bounded task for a parent agent. You have a separate conversation and share its working directory. Work only on the assigned task. Other agents may edit files concurrently; do not undo their changes. Return a concise report with evidence, changed paths, checks, and unresolved issues. You cannot delegate. Your tool allowlist is not an OS sandbox.`,
+				...(child.archiveDir ? [`Your run and final report are archived automatically in ${JSON.stringify(child.archiveDir)}. If your tools allow writing, save temporary reports and test logs in ${JSON.stringify(join(child.archiveDir, "artifacts"))}. Keep project deliverables in their requested project paths. List any artifacts in your final report.`] : []),
 			],
 		});
 		await loader.reload();
@@ -68,6 +93,8 @@ export default function subagent(pi: ExtensionAPI): void {
 		}),
 		execute: async (_callId, args, signal, _update, ctx) => {
 			if (signal?.aborted) throw new Error("Subagent operation cancelled.");
+			if (initializationError) throw new Error(`Subagent storage initialization failed: ${String(initializationError)}`);
+			runtime.setBranch(ctx.sessionManager.getLeafId());
 			let selected: string[] = [];
 			const requireId = () => {
 				if (!args.id) throw new Error(`${args.action} requires id.`);
@@ -110,16 +137,17 @@ export default function subagent(pi: ExtensionAPI): void {
 				content: [{ type: "text", text: JSON.stringify(children.map((child) => ({
 					id: child.id, role: child.role, task: bounded(child.task, 256), status: child.status, turn: child.turn,
 					model: child.model, tools: child.tools, resumable: child.resumable,
+					archiveDir: child.archiveDir, artifactsDir: child.archiveDir ? join(child.archiveDir, "artifacts") : undefined,
 					output: bounded(child.output, outputBytes), error: child.error ? bounded(child.error, 512) : undefined,
 				}))) }],
 				details,
 			};
 		},
 	});
-	pi.on("session_start", async (_event, ctx) => { await runtime.shutdown(); runtime.restore(ctx.sessionManager.getBranch()); });
+	pi.on("session_start", async (_event, ctx) => restore(ctx));
 	pi.on("session_before_switch", () => runtime.shutdown());
 	pi.on("session_before_fork", () => runtime.shutdown());
 	pi.on("session_before_tree", () => runtime.shutdown());
-	pi.on("session_tree", (_event, ctx) => runtime.restore(ctx.sessionManager.getBranch()));
+	pi.on("session_tree", (_event, ctx) => restore(ctx));
 	pi.on("session_shutdown", () => runtime.shutdown());
 }

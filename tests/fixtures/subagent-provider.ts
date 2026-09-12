@@ -46,8 +46,14 @@ export default function fixture(pi: ExtensionAPI): void {
 								return data[0].id;
 							}));
 							call("pi_subagent", resolved);
-						} else message.content = [{ type: "text", text: "E2E_PARENT_DONE" }];
-					} else if (latest.startsWith("E2E_BLOCK")) {
+						} else {
+							message.content = [{ type: "text", text: "E2E_PARENT_DONE" }];
+							const delay = Number(process.env.PI_E2E_PARENT_SETTLE_MS ?? 0);
+							if (delay > 0) { setTimeout(finish, delay); return; }
+						}
+					} else if (latest.startsWith("E2E_READ_BLOCK ") && results.length === 0) {
+						call("read", { path: latest.slice(15) });
+					} else if (latest.startsWith("E2E_BLOCK") || latest.startsWith("E2E_READ_BLOCK ")) {
 						const end = () => { message.stopReason = "aborted"; finish(); };
 						if (options?.signal?.aborted) end();
 						else options?.signal?.addEventListener("abort", end, { once: true });
@@ -56,6 +62,10 @@ export default function fixture(pi: ExtensionAPI): void {
 						message.stopReason = "error"; message.errorMessage = "E2E_PROVIDER_ERROR";
 					} else if (latest.startsWith("E2E_LENGTH")) {
 						message.stopReason = "length"; message.content = [{ type: "text", text: "Incomplete response" }];
+					} else if (latest === "E2E_ARTIFACT" && results.length === 0) {
+						const match = context.systemPrompt?.match(/save temporary reports and test logs in ("[^"\n]+")\./);
+						if (!match) throw new Error("Missing assigned artifact directory in child prompt");
+						call("write", { path: `${JSON.parse(match[1]!)}/report.txt`, content: "E2E_ARTIFACT_OK" });
 					} else if (latest.startsWith("E2E_BASH ") && results.length === 0) {
 						call("bash", { command: latest.slice(9) });
 					} else if (latest.startsWith("E2E_READ ") && results.length === 0) {

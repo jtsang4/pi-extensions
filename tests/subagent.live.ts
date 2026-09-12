@@ -1,19 +1,21 @@
 /** Provider-backed orchestration smoke test; not part of pnpm test. */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { Snapshot } from "../extensions/subagent/runtime.ts";
 
 const model = process.argv[2];
-if (!model) throw new Error("Usage: pnpm exec node --experimental-strip-types tests/subagent.live.ts provider/model-id");
+if (!model) throw new Error("Usage: pnpm exec node --experimental-strip-types tests/subagent.live.ts provider/model-id [--archive]");
 const repo = resolve(import.meta.dirname, "..");
 const artifacts = await mkdtemp(`${tmpdir()}/pi-subagent-live-`);
-const prompt = "E2E_SUBAGENT_LIVE: Use pi_subagent spawn to create one scout whose entire task is: Reply exactly E2E_CHILD_OK. Then use pi_subagent wait for that id until terminal. If completed, send to the same id this follow-up: What exact marker did you reply previously? Reply that marker followed by E2E_FOLLOWUP_OK. Wait until terminal again. Finally reply E2E_PARENT_OK only if both turns completed. Do not call other tools or spawn additional children.";
+const archive = process.argv.includes("--archive");
+const assignedTask = archive ? "Create one worker with this task: Your system prompt provides an artifacts directory. Use write to save live.txt there containing exactly E2E_ARTIFACT_LIVE. Then reply exactly E2E_CHILD_OK." : "Create one scout with this task: Reply exactly E2E_CHILD_OK.";
+const prompt = `E2E_SUBAGENT_LIVE: Use pi_subagent spawn. ${assignedTask} Then use pi_subagent wait for that id until terminal. If completed, send to the same id this follow-up: What exact marker did you reply previously? Reply that marker followed by E2E_FOLLOWUP_OK. Wait until terminal again. Finally reply E2E_PARENT_OK only if both turns completed. Do not call other tools yourself or spawn additional children.`;
 const args = ["--offline", "--no-extensions", "-e", repo, "--no-skills", "--no-prompt-templates", "--no-context-files",
-	"--no-session", "--mode", "json", "--tools", "pi_subagent,read,grep,find,ls", "--model", model, "--thinking", "off", "-p", prompt];
-const child = spawn("pi", args, { cwd: repo, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+	...(archive ? ["--session", `${artifacts}/parent-session.jsonl`] : ["--no-session"]), "--mode", "json", "--tools", `pi_subagent,read,grep,find,ls${archive ? ",write" : ""}`, "--model", model, "--thinking", "off", "-p", prompt];
+const child = spawn("pi", args, { cwd: repo, env: { ...process.env, PI_SUBAGENT_STORAGE_DIR: `${artifacts}/subagents` }, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
 let stdout = "", stderr = "", expired = false;
 child.stdout.on("data", (data) => { stdout += data; });
 child.stderr.on("data", (data) => { stderr += data; });
@@ -47,4 +49,11 @@ assert.equal(final.turn, 2);
 assert.match(final.output, /E2E_CHILD_OK/);
 assert.match(final.output, /E2E_FOLLOWUP_OK/);
 assert.ok(events.some((event) => event.type === "message_end" && event.message.role === "assistant" && event.message.content.some((part: { text?: string }) => part.text?.includes("E2E_PARENT_OK"))));
+if (archive) {
+	const first = snapshots.flatMap((snapshot) => snapshot.children).find((child) => child.turn === 1 && child.status === "completed")!;
+	assert.equal(await readFile(`${first.archiveDir}/artifacts/live.txt`, "utf8"), "E2E_ARTIFACT_LIVE");
+	assert.match(await readFile(`${final.archiveDir}/result.md`, "utf8"), /E2E_FOLLOWUP_OK/);
+	assert.deepEqual(final.history, []);
+	console.log("PASS real worker saves assigned artifact; both turns archived with compact parent references");
+}
 console.log("PASS real parent delegation, terminal result collection, child continuation and recall");

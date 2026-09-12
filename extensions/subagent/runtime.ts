@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { truncateTail, type AgentSession, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ArchiveRef, RunArchive, StorageContext } from "./storage.ts";
 
 export type ChildSession = Pick<AgentSession, "messages" | "isStreaming" | "prompt" | "steer" | "abort" | "dispose" | "subscribe">;
 export type History = AgentSession["messages"];
@@ -18,8 +19,11 @@ export type Child = {
 	turn: number;
 	timeoutMs: number;
 	maxTurns: number;
+	archive?: ArchiveRef;
+	checkpoint?: ArchiveRef;
+	archiveDir?: string;
 };
-export type Snapshot = { version: 1; children: Child[] };
+export type Snapshot = { version: 1 | 2; children: Child[] };
 type Run = { child: Child; session?: ChildSession; done: Promise<void>; reason?: string; cancelStart?: () => void };
 export type Factory = (child: Child) => Promise<ChildSession>;
 
@@ -34,28 +38,54 @@ export class SubagentRuntime {
 	private runs = new Map<string, Run>();
 	private starting = new Set<Run>();
 	private closing = false;
+	private storage?: StorageContext;
 
 	snapshot(): Snapshot {
-		return { version: 1, children: structuredClone([...this.children.values()]) };
+		return { version: 2, children: structuredClone([...this.children.values()].map((child) =>
+			child.checkpoint ? { ...child, history: [] } : child)) };
 	}
 
-	restore(entries: readonly SessionEntry[]): void {
+	async restore(entries: readonly SessionEntry[], storage?: StorageContext): Promise<void> {
 		if (this.runs.size) throw new Error("Stop subagents before restoring a branch.");
+		this.storage = storage;
 		let snapshot: Snapshot = { version: 1, children: [] };
 		for (const entry of entries) {
 			if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "pi_subagent" || entry.message.isError) continue;
 			const details = entry.message.details as Snapshot | undefined;
-			if (details?.version === 1 && Array.isArray(details.children)) snapshot = details;
+			if ((details?.version === 1 || details?.version === 2) && Array.isArray(details.children)) snapshot = details;
 		}
-		this.children = new Map(structuredClone(snapshot.children).map((child) => {
+		const children = structuredClone(snapshot.children);
+		for (const child of children) {
+			if (child.checkpoint) {
+				try {
+					if (!storage) throw new Error("Archive access is disabled for an ephemeral parent session.");
+					if (child.checkpoint.childId !== child.id) throw new Error("Checkpoint belongs to a different child.");
+					child.history = await storage.store.readHistory(child.checkpoint);
+					child.resumable = true;
+				} catch (error) {
+					child.history = [];
+					child.resumable = false;
+					child.error = bounded(`Cannot restore subagent checkpoint: ${String(error)}. Read the archived result or spawn a new child with a summary.`, 2048);
+				}
+			}
 			if (child.status === "running") {
 				child.status = "stopped";
-				child.error = "Runtime ended before this turn was checkpointed. Send a new task to continue from the last checkpoint.";
+				child.error ??= "Runtime ended before this turn was checkpointed. Send a new task to continue from the last checkpoint; uncollected results may be in archiveDir.";
 			}
-			return [child.id, child];
-		}));
+			if (storage && child.archive) {
+				try { child.archiveDir = storage.store.path(child.archive); }
+				catch {
+					delete child.archiveDir;
+					child.resumable = false;
+					child.error = "Invalid subagent archive reference; spawn a new child with a summary.";
+				}
+			}
+		}
+		this.children = new Map(children.map((child) => [child.id, child]));
 		this.closing = false;
 	}
+
+	setBranch(branchId: string | null): void { if (this.storage) this.storage = { ...this.storage, branchId }; }
 
 	get(id: string): Child {
 		const child = this.children.get(id);
@@ -89,7 +119,7 @@ export class SubagentRuntime {
 			await run.session.steer(message);
 			return;
 		}
-		if (!child.resumable) throw new Error("Child context exceeded the checkpoint limit; spawn a new child with a summary.");
+		if (!child.resumable) throw new Error("Child checkpoint is unavailable or exceeded the checkpoint limit; spawn a new child with a summary.");
 		this.checkCapacity();
 		this.start(child, message, factory);
 	}
@@ -99,6 +129,13 @@ export class SubagentRuntime {
 		child.error = undefined;
 		child.output = "";
 		child.turn++;
+		if (this.storage) {
+			child.archive = { parentId: this.storage.parentId, childId: child.id, runId: randomUUID() };
+			child.archiveDir = this.storage.store.path(child.archive);
+		} else {
+			delete child.archive;
+			delete child.archiveDir;
+		}
 		const run: Run = { child, done: Promise.resolve() };
 		this.runs.set(child.id, run); // Reserve synchronously, including session initialization.
 		run.done = this.execute(run, task, factory);
@@ -106,6 +143,9 @@ export class SubagentRuntime {
 
 	private async execute(run: Run, task: string, factory: Factory): Promise<void> {
 		const child = run.child;
+		const storage = this.storage;
+		let archive: RunArchive | undefined;
+		let fullOutput = "";
 		let unsubscribe: (() => void) | undefined;
 		const stop = (reason: string) => {
 			run.reason ??= reason;
@@ -114,6 +154,8 @@ export class SubagentRuntime {
 		};
 		const timer = setTimeout(() => stop("Subagent turn timed out."), child.timeoutMs);
 		try {
+			if (storage && child.archive) archive = await storage.store.begin(child.archive, storage, child, task);
+			if (run.reason) return;
 			this.starting.add(run);
 			const creating = Promise.resolve().then(() => {
 				if (run.reason) throw new Error(run.reason);
@@ -134,12 +176,14 @@ export class SubagentRuntime {
 			let turns = 0;
 			let final: History[number] | undefined;
 			unsubscribe = session.subscribe((event) => {
+				archive?.record(event);
 				if (event.type === "message_end" && event.message.role === "assistant") final = event.message;
 				if (event.type === "turn_end" && ++turns >= child.maxTurns && event.message.role === "assistant" && event.message.stopReason === "toolUse") stop("Subagent model-turn limit reached.");
 			});
 			await session.prompt(task, { source: "extension", expandPromptTemplates: false });
 			if (final?.role !== "assistant") throw new Error("Subagent produced no terminal assistant message.");
-			child.output = bounded(final.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
+			fullOutput = final.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+			child.output = bounded(fullOutput);
 			if (final.stopReason !== "stop") throw new Error(final.errorMessage || `Subagent ended with ${final.stopReason}.`);
 			child.status = "completed";
 		} catch (error) {
@@ -148,17 +192,36 @@ export class SubagentRuntime {
 		} finally {
 			clearTimeout(timer);
 			unsubscribe?.();
+			const previousHistory = child.history;
 			let cleanupError: string | undefined;
 			if (run.session) {
 				// AgentSession.messages is the compacted, protocol-valid continuation context.
 				const history = structuredClone(run.session.messages);
-				child.resumable = Buffer.byteLength(JSON.stringify(history)) <= 2_000_000;
+				child.resumable = !!archive || Buffer.byteLength(JSON.stringify(history)) <= 2_000_000;
 				child.history = child.resumable ? history : [];
 				try { run.session.dispose(); }
 				catch (error) { cleanupError = bounded(`Cleanup failed: ${String(error)}`, 2048); }
 			}
 			if (run.reason) { child.status = "stopped"; child.error = run.reason; }
 			if (cleanupError) { child.status = "failed"; child.error = [child.error, cleanupError].filter(Boolean).join("\n"); }
+			if (archive && child.archive) {
+				const terminal = structuredClone(child);
+				child.status = "running"; // Keep the slot/status live until all archive writes settle.
+				child.history = previousHistory; // Polls must still checkpoint the previous collected context.
+				try {
+					await archive.finish(terminal, fullOutput || terminal.error || "");
+					child.checkpoint = child.archive;
+					child.history = terminal.history;
+					child.status = terminal.status;
+				} catch (error) {
+					delete child.checkpoint;
+					child.status = "failed";
+					child.error = bounded([terminal.error, `Subagent archive failed: ${String(error)}`].filter(Boolean).join("\n"), 2048);
+					child.history = terminal.history;
+					child.resumable = Buffer.byteLength(JSON.stringify(child.history)) <= 2_000_000;
+					if (!child.resumable) child.history = [];
+				}
+			}
 			this.runs.delete(child.id);
 		}
 	}

@@ -1,7 +1,7 @@
 /** Run: pnpm exec node --experimental-strip-types tests/subagent.e2e.ts */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { Snapshot } from "../extensions/subagent/runtime.ts";
@@ -10,15 +10,16 @@ const repo = resolve(import.meta.dirname, "..");
 const artifacts = await mkdtemp(`${tmpdir()}/pi-subagent-e2e-`);
 console.log(`Artifacts: ${artifacts}`);
 const dataFile = `${artifacts}/input.txt`;
+const archiveRoot = `${artifacts}/subagents`;
 await writeFile(dataFile, "E2E_FILE_CONTENT\n");
 
 type Result = { isError: boolean; details: Snapshot; content: { type: string; text: string }[] };
-async function run(name: string, steps: Record<string, unknown>[], extra: string[] = []) {
+async function run(name: string, steps: Record<string, unknown>[], extra: string[] = [], parentDelayMs = 0) {
 	const args = ["--offline", "--no-extensions", "-e", repo, "-e", `${repo}/tests/fixtures/subagent-provider.ts`,
 		"--no-skills", "--no-prompt-templates", "--no-context-files", ...(extra.includes("--session") ? [] : ["--no-session"]), "--mode", "json", "--thinking", "off",
 		"--model", "subagent-fixture/scripted", "--tools", "pi_subagent,read,grep,find,ls,bash,write,edit", ...extra, "-p", `E2E_PARENT ${JSON.stringify(steps)}`];
 	await writeFile(`${artifacts}/${name}.command.json`, JSON.stringify({ cwd: repo, executable: "pi", args }));
-	const child = spawn("pi", args, { cwd: repo, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+	const child = spawn("pi", args, { cwd: repo, env: { ...process.env, PI_SUBAGENT_STORAGE_DIR: archiveRoot, PI_E2E_PARENT_SETTLE_MS: String(parentDelayMs) }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
 	let stdout = "", stderr = "";
 	child.stdout.on("data", (data) => { stdout += data; });
 	child.stderr.on("data", (data) => { stderr += data; });
@@ -101,6 +102,8 @@ for (const [name, task, extra, expected] of [
 const invalid = await run("invalid", [{ action: "spawn", task: " " }, { action: "send", id: "unknown", task: "hello" }, { action: "spawn", task: "hello", model: "missing/model" }]);
 assert.ok(invalid.every((result) => result.isError));
 console.log("PASS invalid requests");
+await assert.rejects(lstat(archiveRoot), { code: "ENOENT" });
+console.log("PASS --no-session creates no global archive");
 
 const sessionPath = `${artifacts}/persisted.jsonl`;
 const persisted = await run("persist", [spawnTask("E2E_REMEMBER_7391"), wait], ["--session", sessionPath]);
@@ -109,6 +112,34 @@ assert.equal(lastChild(restored).status, "completed");
 assert.equal(lastChild(restored).turn, 2);
 assert.ok(JSON.parse(lastChild(restored).output).users.includes("E2E_REMEMBER_7391"));
 console.log("PASS durable restoration in a new CLI process");
+assert.deepEqual(lastChild(restored).history, [], "persistent parent results contain references instead of child history");
+assert.ok(lastChild(restored).checkpoint);
+assert.notDeepEqual(lastChild(persisted).checkpoint, lastChild(restored).checkpoint);
+
+const uncollected = await run("uncollected", [spawnTask("E2E_NO_WAIT_RESULT")], ["--session", `${artifacts}/session-uncollected.jsonl`], 1000);
+const uncollectedDir = lastChild(uncollected).archiveDir!;
+assert.match(await readFile(`${uncollectedDir}/result.md`, "utf8"), /E2E_NO_WAIT_RESULT/);
+assert.equal(JSON.parse(await readFile(`${uncollectedDir}/meta.json`, "utf8")).child.status, "completed");
+assert.ok(JSON.parse(await readFile(`${uncollectedDir}/checkpoint.json`, "utf8")).history.length > 0);
+const uncollectedRestore = await run("uncollected-restore", [{ action: "list" }], ["--session", `${artifacts}/session-uncollected.jsonl`]);
+assert.equal(lastChild(uncollectedRestore).status, "stopped", "restoration does not silently adopt the future terminal state");
+console.log("PASS automatic result archival without wait/list and no future state adoption");
+
+const artifactResult = await run("artifact", [spawnTask("E2E_ARTIFACT", { role: "worker" }), wait], ["--session", `${artifacts}/session-artifact.jsonl`]);
+assert.equal(lastChild(artifactResult).status, "completed");
+assert.equal(await readFile(`${lastChild(artifactResult).archiveDir}/artifacts/report.txt`, "utf8"), "E2E_ARTIFACT_OK");
+const largeArchive = await run("large-archive", [spawnTask("E2E_LARGE"), wait], ["--session", `${artifacts}/session-large.jsonl`]);
+assert.equal(await readFile(`${lastChild(largeArchive).archiveDir}/result.md`, "utf8"), "大".repeat(30_000));
+assert.ok(Buffer.byteLength(lastChild(largeArchive).output) < 16_500);
+console.log("PASS assigned artifact directory and untruncated archived report");
+
+const bashArchive = await run("bash-output-archive", [spawnTask("E2E_BASH node -e 'console.log(\"X\".repeat(80000))'", { role: "worker" }), wait], ["--session", `${artifacts}/session-bash-output.jsonl`]);
+assert.equal(lastChild(bashArchive).status, "completed");
+const bashEvents = (await readFile(`${lastChild(bashArchive).archiveDir}/events.jsonl`, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+const copiedOutput = bashEvents.find((event) => event.type === "artifact");
+assert.ok(copiedOutput);
+assert.match(await readFile(`${lastChild(bashArchive).archiveDir}/${copiedOutput.path}`, "utf8"), /X{80000}/);
+console.log("PASS automatic copy of truncated built-in bash output");
 
 // Exercise the actual built-in bash cancellation, including its descendant.
 for (const mode of ["stop", "timeout", "shutdown"] as const) {

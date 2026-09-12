@@ -8,6 +8,7 @@ import type { Snapshot } from "../extensions/subagent/runtime.ts";
 
 const repo = resolve(import.meta.dirname, "..");
 const artifacts = await mkdtemp(`${tmpdir()}/pi-subagent-branch-`);
+process.env.PI_SUBAGENT_STORAGE_DIR = `${artifacts}/subagents`;
 const deadline = setTimeout(() => { console.error("E2E_BRANCH_TIMEOUT"); process.exit(1); }, 30_000);
 const settingsManager = SettingsManager.inMemory();
 const loader = new DefaultResourceLoader({ cwd: repo, agentDir: artifacts, settingsManager,
@@ -15,7 +16,7 @@ const loader = new DefaultResourceLoader({ cwd: repo, agentDir: artifacts, setti
 	additionalExtensionPaths: [repo, `${repo}/tests/fixtures/subagent-provider.ts`] });
 await loader.reload();
 const { session, extensionsResult } = await createAgentSession({ cwd: repo, resourceLoader: loader, settingsManager,
-	sessionManager: SessionManager.inMemory(repo), tools: ["pi_subagent", "read"] });
+	sessionManager: SessionManager.create(repo, artifacts), tools: ["pi_subagent", "read"] });
 assert.deepEqual(extensionsResult.errors, []);
 assert.ok(extensionsResult.extensions.some((extension) => extension.path === `${repo}/extensions/subagent/index.ts`));
 const events: unknown[] = [];
@@ -48,6 +49,16 @@ try {
 	await prompt([{ action: "send", id: childId, task: "E2E_BRANCH_RESUME" }, { action: "wait" }]);
 	assert.equal(latest().children[0]!.status, "completed");
 	assert.match(latest().children[0]!.output, /E2E_BRANCH_RESUME/);
+	const old = session.sessionManager.getBranch().filter((entry) => entry.type === "message" && entry.message.role === "toolResult").at(-1)!.id;
+	const firstArchive = latest().children[0]!.checkpoint;
+	await prompt([{ action: "send", id: childId, task: "E2E_FUTURE_BRANCH" }, { action: "wait" }]);
+	const futureArchive = latest().children[0]!.checkpoint;
+	await session.navigateTree(old, { summarize: false });
+	await prompt([{ action: "send", id: childId, task: "E2E_OTHER_BRANCH" }, { action: "wait" }]);
+	assert.doesNotMatch(latest().children[0]!.output, /E2E_FUTURE_BRANCH/);
+	assert.match(latest().children[0]!.output, /E2E_BRANCH_RESUME/);
+	assert.notDeepEqual(latest().children[0]!.checkpoint, firstArchive);
+	assert.notDeepEqual(latest().children[0]!.checkpoint, futureArchive);
 	console.log("PASS package discovery, real tree navigation, branch isolation, interrupted restoration and continuation");
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type === "tool_execution_start" && event.toolName === "pi_subagent" && event.args.waitMs === 60_000) {

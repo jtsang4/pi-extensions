@@ -39,21 +39,82 @@ conversation for follow-up tasks. It works in TUI, JSON and RPC modes.
   and 32 model turns (`maxTurns`: 1–100). A deadline or exhausted turn budget
   stops the child. Follow-ups receive a fresh budget.
 
-Tool-result `details` checkpoint child configuration, state, and continuation
-context in the main session. This avoids mutable external session files being
-shared by different main branches. Reload and tree navigation reconstruct only
-the active branch. A checkpoint showing `running` becomes `stopped`; it never
-silently restarts work. A follow-up resumes from the last collected checkpoint.
-Use `wait` or `list` to collect completed results before leaving the session.
-Completion is pull-based; it does not inject a new parent turn. Parent shutdown,
-reload, session replacement, forking, and tree navigation stop active children.
-
 The child returns a text summary, capped at 16 KiB/400 lines. `list` provides
-short previews; targeted `wait` retrieves the larger summary. Each child's
-continuation context is capped at 2 MB in checkpoints. Larger contexts set
-`resumable: false`; spawn a new child with a summary if continuation is needed.
-Checkpoints include model usage in assistant history; child usage is not added
-to Pi's main-session cost counter.
+short previews; targeted `wait` retrieves the larger summary. Completion is
+pull-based; it does not inject a new parent turn. Parent shutdown, reload,
+session replacement, forking, and tree navigation stop active children.
+
+## Run archives
+
+When the parent has a persistent session, each spawn and idle follow-up gets a
+unique run directory. Archives are separate from Pi's official `~/.pi/agent/`
+directory:
+
+```text
+~/.pi/subagents/<parent-session-id>/<child-id>/<run-id>/
+  meta.json          # Task, model, tool scope, status, timestamps, working directory
+  events.jsonl       # Completed messages, tool starts/results, compactions, lifecycle
+  result.md          # Full final text, without the parent summary's truncation
+  checkpoint.json    # Immutable continuation history for this particular run
+  artifacts/        # Worker reports/logs and copies of oversized Bash output
+```
+
+Logging starts with the run and appends completed events as they happen; token
+deltas are not recorded. The final report and checkpoint are saved automatically,
+even if the parent never calls `wait` or `list`. Tool results expose `archiveDir`
+and `artifactsDir`. Workers are instructed to put temporary reports and test logs
+in their assigned artifact directory; project deliverables stay at their requested
+paths. Writing arbitrary worker artifacts still depends on the task and available
+tools. The archive automatically copies full output files created by Pi's Bash
+tool when its response exceeds the tool's output limit.
+
+Version 2 tool-result `details` keep child configuration, bounded summaries, and
+references to immutable checkpoints. Full child conversations are stored once per
+run instead of being repeated in every parent poll. Reload and tree navigation
+load only the checkpoint referenced by the active branch, never a newer run found
+on disk. Version 1 inline checkpoints from earlier releases remain readable.
+
+A checkpoint showing `running` becomes `stopped`; it never silently restarts work.
+Use `wait` or `list` to collect completed results before leaving the session so a
+follow-up can resume from that checkpoint. An uncollected report can still exist
+in `archiveDir`, but is not automatically adopted into an older branch. If Pi is
+forcibly terminated, already-written events remain available; the last queued
+writes and final checkpoint may be absent. This is diagnostic retention, not
+automatic recovery or a guarantee against power loss.
+
+Persistent checkpoints do not have the old 2 MB history limit. Missing, expired,
+or corrupt checkpoints leave the summary visible and disable continuation with
+an explicit error. Copy the corresponding archive directories along with a parent
+session when moving it to another machine. Checkpoints include model usage in
+assistant history; child usage is not added to Pi's main-session cost counter.
+Archive write failures mark the child as failed and are reported to the parent.
+
+With `--no-session`, no subagent archive, artifact directory, or archive cleanup is
+created. Child history stays in memory/tool details with the existing 2 MB limit;
+larger histories set `resumable: false`. Explicit file operations requested from
+workers still work normally.
+
+## Retention settings
+
+Set these environment variables before starting Pi:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PI_SUBAGENT_STORAGE_DIR` | `~/.pi/subagents` | Archive root; `~/` is expanded. |
+| `PI_SUBAGENT_RETENTION_DAYS` | `30` | Remove inactive runs older than this many days; `0` disables age cleanup. |
+| `PI_SUBAGENT_MAX_STORAGE_MB` | `1024` | Remove oldest inactive runs when archives exceed this many MiB; `0` disables capacity cleanup. |
+
+Cleanup runs on persistent session initialization, reload, and tree navigation.
+It removes only recognized run directories, leaving unrelated files and symlinks
+alone. Runs owned by live Pi processes and archives referenced by the active
+session are protected. Small `.lease-<pid>.json` files at the parent-session level
+also protect resumed archives from other Pi processes' cleanup for the current
+process's lifetime. Dead leases are cleaned automatically. The capacity setting
+is a soft limit while protected runs remain active. Closed sessions' archives can
+expire; their parent session then retains summaries but cannot continue those
+children. Set both limits to `0` to retain archives until manually removed.
+
+## Execution environment
 
 Children share the working directory and the Pi process's system access. Assign
 non-overlapping files to parallel workers. Tool allowlists are not an OS sandbox:
