@@ -29,7 +29,7 @@ console.log("[smoke] creating real agent session (loads global packages incl. op
 const loader = new DefaultResourceLoader({
 	cwd: CWD,
 	agentDir: `${process.env.HOME}/.pi/agent`,
-	additionalExtensionPaths: [`${REPO}/extensions/better-compaction/index.ts`],
+	additionalExtensionPaths: [`${REPO}/archives/better-compaction/index.ts`],
 });
 await loader.reload(); // required when passing a custom resourceLoader
 const { session, extensionsResult } = await createAgentSession({ cwd: CWD, resourceLoader: loader });

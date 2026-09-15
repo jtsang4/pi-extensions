@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, Context, Message, Model, Usage } from "@earendil-works/pi-ai";
-import betterCompactionExtension, { createSessionBeforeCompactHandler, type CompleteFn } from "../extensions/better-compaction/index.ts";
+import betterCompactionExtension, { createSessionBeforeCompactHandler, type CompleteFn } from "../archives/better-compaction/index.ts";
 import {
 	buildCheckpointInstruction,
 	buildSummaryMessages,
@@ -17,7 +17,7 @@ import {
 	pruneToolResults,
 	shouldYieldToRemoteCompaction,
 	summaryPassesShrink,
-} from "../extensions/better-compaction/pipeline.ts";
+} from "../archives/better-compaction/pipeline.ts";
 
 // ---------- helpers ----------
 
