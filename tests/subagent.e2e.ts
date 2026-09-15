@@ -126,18 +126,60 @@ for (const [name, task, extra, expected] of [
 	console.log(`PASS ${name}`);
 }
 
-const invalid = await run("invalid", [{ action: "spawn", task: " " }, { action: "send", id: "unknown", task: "hello" }, { action: "spawn", task: "hello", model: "missing/model" }]);
+const invalid = await run("invalid", [{ action: "spawn", task: " " }, { action: "spawn", task: "" }, { action: "spawn", task: null },
+	{ action: "send", id: null, task: "hello" }, { action: "send", id: "unknown", task: "hello" },
+	{ action: "spawn", task: "hello", model: "missing/model" }, { action: "spawn", task: "hello", maxTurns: 0 },
+	{ action: "spawn", task: "hello", unknownField: null }]);
 assert.ok(invalid.every((result) => result.isError));
 console.log("PASS invalid requests");
+// Replay the parameter shape observed in a remote Paseo session.
+// Its model populated the entire management schema even for a spawn call.
+const populatedSpawn = await run("populated-spawn", [
+	{ action: "spawn", task: `E2E_READ ${dataFile}`, id: "", ids: ["unused"], role: "scout", model: "", timeoutMs: 300_000, maxTurns: 16, waitMs: 1000, waitFor: "all", offset: 0 },
+	wait,
+]);
+assert.ok(populatedSpawn.every((result) => !result.isError), "unrelated populated fields must not prevent a valid spawn");
+assert.equal(lastChild(populatedSpawn).status, "completed");
+assert.ok(lastChild(populatedSpawn).output.includes("E2E_FILE_CONTENT"));
+assert.deepEqual(JSON.parse(populatedSpawn[0]!.content[0]!.text)[0].ignoredParameters, ["id", "ids", "waitMs", "waitFor", "offset"]);
+console.log("PASS populated management fields do not reject a valid spawn");
 const irrelevant = await run("action-parameters", [spawnTask("E2E_VALID"), wait,
-	{ action: "send", id: "$0", task: "MUST_NOT_RUN", model: "subagent-fixture/alternative" },
-	{ action: "wait", id: "$0", ids: ["$0"] }, { action: "list" }]);
-assert.equal(irrelevant[2]!.isError, true);
+	{ action: "send", id: "$0", task: "E2E_PINNED_FOLLOWUP", model: "subagent-fixture/alternative", role: "worker", timeoutMs: 1000, maxTurns: 1 },
+	{ action: "wait", id: "$0", ids: ["$0"] }, wait, { action: "list" }]);
+assert.equal(irrelevant[2]!.isError, false);
+assert.deepEqual(JSON.parse(irrelevant[2]!.content[0]!.text)[0].ignoredParameters, ["model", "role", "timeoutMs", "maxTurns"]);
 assert.equal(irrelevant[3]!.isError, true);
-assert.equal(lastChild(irrelevant).turn, 1, "invalid action parameters must not silently start work");
-console.log("PASS action-specific parameters reject ignored overrides and ambiguous ID sets");
+assert.equal(lastChild(irrelevant).turn, 2);
+assert.equal(lastChild(irrelevant).status, "completed");
+assert.equal(lastChild(irrelevant).model.id, "scripted");
+assert.equal(lastChild(irrelevant).role, "scout");
+assert.equal(lastChild(irrelevant).timeoutMs, 300_000);
+assert.equal(lastChild(irrelevant).maxTurns, 32);
+assert.deepEqual(JSON.parse(lastChild(irrelevant).output).tools.sort(), ["find", "grep", "ls", "read"]);
+assert.ok(JSON.parse(lastChild(irrelevant).output).users.includes("E2E_PINNED_FOLLOWUP"));
+console.log("PASS extra send configuration is reported without overriding model, role, tools or budgets; ambiguous wait IDs still fail");
 await assert.rejects(lstat(archiveRoot), { code: "ENOENT" });
 console.log("PASS --no-session creates no global archive");
+
+// Exercise every action with the all-properties shape used by strict providers.
+const nullable = { task: null, id: null, ids: null, role: null, model: null, timeoutMs: null, maxTurns: null, waitMs: null, waitFor: null, offset: null };
+const nullableCalls = await run("nullable-actions", [
+	{ ...nullable, action: "spawn", task: "E2E_NULLABLE" },
+	{ ...nullable, action: "wait", id: "", ids: [] },
+	{ ...nullable, action: "send", id: "$0", task: "E2E_NULLABLE_FOLLOWUP" },
+	{ ...nullable, action: "wait", id: "$0", ids: [] },
+	{ ...nullable, action: "list", task: "" },
+	{ ...nullable, action: "result", id: "$0", offset: 0 },
+	{ ...nullable, action: "stop", id: "$0" },
+	{ ...nullable, action: "forget", id: "$0" },
+	{ ...nullable, action: "list" },
+], ["--session", `${artifacts}/session-nullable.jsonl`]);
+assert.ok(nullableCalls.every((result) => !result.isError), "nullable parameters must survive real Pi argument validation for every action");
+assert.equal(nullableCalls[3]!.details.children[0]!.turn, 2);
+assert.equal(nullableCalls[3]!.details.children[0]!.status, "completed");
+assert.match(JSON.parse(nullableCalls[5]!.content[0]!.text)[0].result.text, /E2E_NULLABLE_FOLLOWUP/);
+assert.deepEqual(nullableCalls.at(-1)!.details.children, []);
+console.log("PASS nullable fields across all seven actions, empty unused task, empty wait selectors and explicit zero offset");
 
 const sessionPath = `${artifacts}/persisted.jsonl`;
 const persisted = await run("persist", [spawnTask("E2E_REMEMBER_7391"), wait], ["--session", sessionPath]);

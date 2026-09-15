@@ -145,3 +145,53 @@ No known unresolved failures remain in the reviewed contract and scenarios.
 This does not establish arbitrary-task correctness: workers still share the
 filesystem, completion remains pull-based, and cancellation relies on the SDK.
 The real-model test checks concrete outputs, not merely the model's success claim.
+
+## Remote argument-loop regression, 2026-09-16
+
+Read a remote Paseo session through the CLI and SDK timeline interface. The
+canonical timeline had 995 entries; the projected timeline had 366 entries,
+with no older/newer page, gap, stale cursor or fetch error. All 94 actual
+`pi_subagent` calls were `spawn`, rejected with the same message:
+`spawn does not accept: id, ids, waitMs, waitFor, offset.` No child was admitted.
+The model repeatedly populated the whole management schema, including an empty
+or placeholder `id`, placeholder `ids`, wait options and zero offset. The
+timeline establishes the emitted arguments, not why the model/gateway chose
+them. Separate parent-provider request timeouts are outside this extension fix.
+Private tasks, full transcripts and connection credentials are not fixtures.
+
+The earlier action-rejection test codified the behavior behind this failure.
+Replace it with assertions that a follow-up succeeds while keeping its original
+model, role, tools and budgets, and reports ignored fields. Ambiguous wait IDs
+still fail. The new normalizer projects known fields onto the chosen action;
+unused options can be omitted or null. Required tasks/IDs, unknown fields and
+schema ranges remain checked. A literal-null enum branch avoids Pi coercing
+invalid zero budgets into null; it also preserves null defaults on older Pi
+TypeBox versions without their nullable-array compiler failure.
+
+Evidence against the complete local package, Node 24.15.0:
+
+- Before the fix, replaying the observed populated spawn failed the new E2E
+  assertion: `/tmp/pi-subagent-parameters-before.log`.
+- `pnpm verify`: 85 tests, type checking and tarball inspection passed;
+  `/tmp/pi-subagent-parameters-verify.log`.
+- Full CLI/branch/crash/policy matrix with the locked CLI 0.82.1:
+  `/tmp/pi-subagent-parameters-e2e.log`. The CLI matrix also passed with the
+  installed CLI 0.85.1: `/tmp/pi-subagent-parameters-after.log`. Both load the
+  working-tree extension and its locked SDK dependency. New coverage includes
+  the observed spawn shape, pinned follow-ups and all seven nullable actions.
+- Real `openai-codex/gpt-6-astra` delegation, wait and continuation passed:
+  `/tmp/pi-subagent-parameters-live-codex.log`. This is a different provider
+  from the remote session's internal gateway; its exact emitted arguments were
+  replayed deterministically, without restarting or messaging the remote agent.
+- Real `deepseek/deepseek-v4-flash` archive/continuation passed:
+  `/tmp/pi-subagent-parameters-live-retry.log`. Its first run completed the
+  management operations but failed the unchanged artifact byte assertion because
+  the model added a newline (`/tmp/pi-subagent-parameters-live.log`). One bounded
+  retry passed the same assertions; this formatting deviation was not treated
+  as an extension error or hidden by weakening the oracle.
+
+Each E2E log names its temporary directory with raw structured events, stderr,
+commands and exit information. Stop/timeout/shutdown and crash checks verified
+process cleanup. No dependencies, lockfile or CI triggers changed; the additional
+regressions run in the existing deterministic suite. Provider-backed smoke tests
+remain outside CI.

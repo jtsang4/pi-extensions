@@ -1,20 +1,15 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager, SettingsManager,
 	type ExtensionAPI, type ExtensionContext, type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { SubagentRuntime, bounded, type Child } from "./runtime.ts";
 import { SubagentStorage, type ResultPage } from "./storage.ts";
+import { normalizeArguments, parameters } from "./parameters.ts";
 import { join } from "node:path";
 
 const ROLES = {
 	scout: ["read", "grep", "find", "ls"],
 	worker: ["read", "grep", "find", "ls", "bash", "edit", "write"],
-};
-const ACTION_FIELDS: Record<string, string[]> = {
-	spawn: ["task", "role", "model", "timeoutMs", "maxTurns"], send: ["id", "task"],
-	wait: ["id", "ids", "waitMs", "waitFor"], stop: ["id"], forget: ["id"], result: ["id", "offset"], list: [],
 };
 
 export default function subagent(pi: ExtensionAPI): void {
@@ -107,30 +102,16 @@ export default function subagent(pi: ExtensionAPI): void {
 		label: "Subagent",
 		description: "Delegate independent tasks to Pi subagents. spawn returns an ID immediately; wait collects all selected results or waitFor:any returns when one finishes (timeout leaves children running); send steers a running child or starts a follow-up on an idle child; stop cancels; list shows results, progress and usage; result reads the full archived report in bounded pages using offset/nextOffset; forget removes a terminal child from this branch while keeping its archives. Default scout has read-only built-ins; worker can modify files using the parent's active built-ins. Separate contexts; no other extensions or their safety hooks. Children share the filesystem. Max 4 active, 32 per branch. Always wait for or stop your children before ending the task.",
 		promptSnippet: "Delegate bounded work to independent, continuable subagents",
-		promptGuidelines: ["Delegate only independent work that benefits from a separate context. Supply all necessary context and success criteria in task. Assign non-overlapping files to workers. Inspect child status and evidence before relying on results. A wait timeout is not failure or cancellation. Use waitFor:any with running IDs to act on early results; exclude already-completed IDs from subsequent waits. Use forget for finished, unrelated tasks when record capacity is needed."],
+		promptGuidelines: ["Delegate only independent work that benefits from a separate context. Supply all necessary context and success criteria in task. Assign non-overlapping files to workers. Inspect child status and evidence before relying on results. A wait timeout is not failure or cancellation. Use waitFor:any with running IDs to act on early results; exclude already-completed IDs from subsequent waits. Use forget for finished, unrelated tasks when record capacity is needed.",
+			"Supply only the fields for the chosen action; omit unused options or set them to null. Known fields for other actions are ignored and listed as ignoredParameters on returned child records. Do not invent placeholder IDs. Only spawn configures model, role and budgets; send keeps the child's original configuration."],
 		executionMode: "sequential",
-		parameters: Type.Object({
-			action: StringEnum(["spawn", "list", "wait", "send", "stop", "forget", "result"]),
-			task: Type.Optional(Type.String({ minLength: 1, maxLength: 32_000 })),
-			id: Type.Optional(Type.String()),
-			ids: Type.Optional(Type.Array(Type.String(), { minItems: 1, maxItems: 32 })),
-			role: Type.Optional(StringEnum(["scout", "worker"])),
-			model: Type.Optional(Type.String({ description: "spawn only: exact provider/model-id; defaults to parent's model." })),
-			timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 600_000, description: "spawn only: per child turn, default 300000." })),
-			maxTurns: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "spawn only: model-turn budget per task, default 32." })),
-			waitMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 60_000, description: "Wait at most this long for all selected children, default 10000." })),
-			waitFor: Type.Optional(StringEnum(["all", "any"], { description: "Default all. any returns when at least one selected child is terminal." })),
-			offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "For result only: byte offset, default 0. Continue with the returned nextOffset." })),
-		}),
-		execute: async (_callId, args, signal, _update, ctx) => {
+		parameters,
+		execute: async (_callId, input, signal, _update, ctx) => {
 			if (signal?.aborted) throw new Error("Subagent operation cancelled.");
+			const { args, ignoredParameters } = normalizeArguments(input);
 			if (!initializationAttempted) await restore(ctx);
 			if (signal?.aborted) throw new Error("Subagent operation cancelled before admission.");
 			if (initializationError) throw new Error(`Subagent storage initialization failed: ${String(initializationError)}`);
-			if (!Object.hasOwn(ACTION_FIELDS, args.action)) throw new Error(`Unknown subagent action: ${args.action}`);
-			const unsupported = Object.entries(args).filter(([key, value]) => key !== "action" && value !== undefined && !ACTION_FIELDS[args.action]?.includes(key)).map(([key]) => key);
-			if (unsupported.length) throw new Error(`${args.action} does not accept: ${unsupported.join(", ")}.`);
-			if (args.id && args.ids) throw new Error("Choose id or ids, not both.");
 			runtime.setBranch(ctx.sessionManager.getLeafId());
 			let selected: string[] = [];
 			let resultPage: ResultPage | undefined;
@@ -177,6 +158,7 @@ export default function subagent(pi: ExtensionAPI): void {
 				content: [{ type: "text", text: JSON.stringify(children.map((child) => ({
 					id: child.id, role: child.role, task: bounded(child.task, 256), status: child.status, turn: child.turn,
 					model: child.model, tools: child.tools, resumable: child.resumable,
+					ignoredParameters: ignoredParameters.length ? ignoredParameters : undefined,
 					archiveDir: child.archiveDir, artifactsDir: child.archiveDir ? join(child.archiveDir, "artifacts") : undefined,
 					activity: child.activity ? { ...child.activity, elapsedMs: Math.max(0, (child.activity.finishedAt ?? Date.now()) - child.activity.startedAt) } : undefined,
 					result: resultPage,

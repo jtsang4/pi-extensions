@@ -68,8 +68,16 @@ conversation for follow-up tasks. It works in TUI, JSON and RPC modes.
   stops the child. Follow-ups receive a fresh budget.
 
 `role`, `model`, `timeoutMs`, and `maxTurns` configure `spawn`; `waitMs` and
-`waitFor` configure `wait`; `offset` configures `result`. Fields intended for
-another action and simultaneous `id`/`ids` are rejected instead of ignored.
+`waitFor` configure `wait`; `offset` configures `result`. Omit unused options or
+set them to `null`. Known fields intended for another action are ignored and
+listed as `ignoredParameters` on returned child records, so models that populate
+the entire schema can still call the tool. In particular, extra configuration
+on `send` never changes the child's pinned model, role or budgets. Empty `id`
+and `model` strings are treated as omitted; an empty `ids` array selects all
+children when `id` is absent. A nonempty task is still required for `spawn` and
+`send`, and a real child ID for `send`, `stop`, `forget` and `result`. Unknown
+fields, invalid field types/ranges, and simultaneous nonempty `id`/`ids` on
+`wait` are rejected.
 
 The child returns a text summary, capped at 16 KiB/400 lines. `list` provides
 short previews; targeted `wait` retrieves the larger summary. Completion is
